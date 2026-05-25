@@ -1,0 +1,27 @@
+[Unit]
+Description=FanVault Commerce Service (Products + Orders)
+Documentation=https://github.com/your-org/fanvault-v2-mono
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fanvault
+Group=fanvault
+WorkingDirectory=/var/www/fanvault-commerce-service
+EnvironmentFile=/var/www/fanvault-commerce-service/.env
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fanvault-commerce
+
+# Harden the process
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/www/fanvault-commerce-service
+
+[Install]
+WantedBy=multi-user.target
