@@ -19,7 +19,7 @@
 
 ## ASCII Architecture Diagram
 
-```
+```text
                           ┌──────────────────────────────────────────────────────────────┐
                           │                  AWS VPC  (10.0.0.0/16)                      │
                           │                                                              │
@@ -29,58 +29,32 @@
    Users (HTTPS)          │  │   ┌──────────────────────┐    ┌──────────────────┐    │ │
    ─────────────────────► │  │   │  Internet-facing ALB  │    │   NAT Gateway    │    │ │
                           │  │   │  (HTTP→HTTPS redirect │    │  (for private EC2│    │ │
-                          │  │   │   + HTTPS forward)    │    │   outbound only) │    │ │
+                          │  │   │   + Path Routing)     │    │   outbound only) │    │ │
                           │  │   └──────────┬───────────┘    └──────────────────┘    │ │
-                          │  └─────────────┼──────────────────────────────────────────┘ │
-                          │                │ HTTPS:443                                   │
-                          │  ┌─────────────▼──────────────────────────────────────────┐ │
-                          │  │         PRIVATE FRONTEND SUBNETS (10.0.11.0/24)        │ │
-                          │  │                                                        │ │
-                          │  │   ┌────────────────────────────────────────────────┐  │ │
-                          │  │   │           fanvault-frontend (Nginx)            │  │ │
-                          │  │   │            EC2 t3.small — port 80              │  │ │
-                          │  │   │                                                │  │ │
-                          │  │   │  Serves static React/Vite dist/               │  │ │
-                          │  │   │  Nginx reverse proxies:                       │  │ │
-                          │  │   │   /api/auth/*  ──► auth-svc.fanvault.internal │  │ │
-                          │  │   │   /api/users/* ──► auth-svc.fanvault.internal │  │ │
-                          │  │   │   /api/products/* ► commerce-svc.fanvault.internal│ │
-                          │  │   │   /api/orders/* ──► commerce-svc.fanvault.internal│ │
-                          │  │   └────────────────────────────────────────────────┘  │ │
-                          │  └────────────────────────────────────────────────────────┘ │
-                          │                │ HTTP:3001 / HTTP:3002                       │
-                          │                │ (via private DNS)                           │
-                          │  ┌─────────────▼──────────────────────────────────────────┐ │
-                          │  │          PRIVATE BACKEND SUBNETS (10.0.21.0/24)        │ │
-                          │  │                                                        │ │
-                          │  │  ┌─────────────────────────┐ ┌──────────────────────┐ │ │
-                          │  │  │  fanvault-user-auth-svc  │ │fanvault-commerce-svc │ │ │
-                          │  │  │  EC2 t3.small — port 3001│ │EC2 t3.small — :3002  │ │ │
-                          │  │  │                          │ │                      │ │ │
-                          │  │  │  POST /api/auth/register │ │GET  /api/products    │ │ │
-                          │  │  │  POST /api/auth/login    │ │POST /api/orders      │ │ │
-                          │  │  │  POST /api/auth/refresh  │ │GET  /api/orders/my   │ │ │
-                          │  │  │  GET  /api/auth/verify   │ │ ...admin routes...   │ │ │
-                          │  │  │  GET  /api/users/me      │ │                      │ │ │
-                          │  │  │  POST /api/users/me      │ │                      │ │ │
-                          │  │  │  PATCH/api/users/me      │ │                      │ │ │
-                          │  │  │  ...addresses...         │ │                      │ │ │
-                          │  │  └──────────────┬───────────┘ └──────────┬───────────┘ │ │
-                          │  └─────────────────┼──────────────────────┼───────────────┘ │
-                          │                    │  mongodb:27017        │                 │
-                          │  ┌─────────────────▼──────────────────────▼───────────────┐ │
+                          │  └──────────────┼─────────────────────────────────────────┘ │
+                          │                 │
+                          │        ┌────────┴────────┬───────────────────┐
+                          │        │                 │                   │
+                          │  ┌─────▼─────┐     ┌─────▼─────┐       ┌─────▼─────┐
+                          │  │  Frontend │     │ Identity  │       │ Commerce  │
+                          │  │ TargetGrp │     │ TargetGrp │       │ TargetGrp │
+                          │  │    /*     │     │ /api/auth │       │ /api/prod │
+                          │  └─────┬─────┘     └─────┬─────┘       └─────┬─────┘
+                          │        │                 │                   │
+                          │  ┌─────▼─────┐     ┌─────▼─────┐       ┌─────▼─────┐
+                          │  │ FRONTEND  │     │ IDENTITY  │       │ COMMERCE  │
+                          │  │ EC2 ASG   │     │ EC2 ASG   │       │ EC2 ASG   │
+                          │  │ :80       │     │ :3001     │       │ :3002     │
+                          │  └───────────┘     └─────┬─────┘       └─────┬─────┘
+                          │                          │                   │
+                          │                          └─────────┬─────────┘
+                          │                                    │
+                          │  ┌─────────────────────────────────▼──────────────────────┐ │
                           │  │             ISOLATED DB SUBNETS (10.0.31.0/24)         │ │
                           │  │                                                        │ │
                           │  │   ┌────────────────────────────────────────────────┐  │ │
                           │  │   │         MongoDB EC2 (t3.medium)                │  │ │
                           │  │   │         db.fanvault.internal : 27017           │  │ │
-                          │  │   │                                                │  │ │
-                          │  │   │  Database: fanvault_db                        │  │ │
-                          │  │   │  Collections:                                 │  │ │
-                          │  │   │   ├── authusers   (AuthUser schema)           │  │ │
-                          │  │   │   ├── userprofiles (UserProfile schema)       │  │ │
-                          │  │   │   ├── products    (Product schema)            │  │ │
-                          │  │   │   └── orders      (Order schema)              │  │ │
                           │  │   └────────────────────────────────────────────────┘  │ │
                           │  └────────────────────────────────────────────────────────┘ │
                           └──────────────────────────────────────────────────────────────┘
@@ -114,9 +88,9 @@
 │ Source                 │ Target                    │ Protocol       │ Purpose                   │
 ├────────────────────────┼───────────────────────────┼────────────────┼───────────────────────────┤
 │ Browser (HTTPS)        │ ALB                       │ HTTPS :443     │ All user requests         │
-│ ALB                    │ Frontend Nginx            │ HTTP :80       │ Forward all traffic       │
-│ Nginx                  │ Identity Service          │ HTTP :3001     │ /api/auth/* /api/users/*  │
-│ Nginx                  │ Commerce Service          │ HTTP :3002     │ /api/products/* /api/orders│
+│ ALB                    │ Frontend Target Group     │ HTTP :80       │ /* (Static files)         │
+│ ALB                    │ Identity Target Group     │ HTTP :3001     │ /api/auth/* /api/users/*  │
+│ ALB                    │ Commerce Target Group     │ HTTP :3002     │ /api/products/* /api/orders│
 │ Identity Service       │ MongoDB                   │ mongodb :27017 │ Read/write auth+profiles  │
 │ Commerce Service       │ MongoDB                   │ mongodb :27017 │ Read/write products+orders│
 └────────────────────────┴───────────────────────────┴────────────────┴───────────────────────────┘
@@ -172,7 +146,7 @@
 |---|---|---|---|---|
 | `PORT` | Express port | Yes | No | `3001` |
 | `NODE_ENV` | Runtime context | Yes | No | `production` |
-| `MONGO_URI` | MongoDB connection string | Yes | **Yes** | `mongodb://user:pass@db.fanvault.internal:27017/fanvault_db?authSource=admin` |
+| `MONGO_URI` | MongoDB connection string | Yes | **Yes** | `mongodb://user:pass@db.fanvault.internal:27017/fanvault_db?authSource=fanvault_db` |
 | `JWT_SECRET` | Access token signing key (shared with Commerce) | Yes | **Yes** | `<32+ random bytes>` |
 | `JWT_EXPIRES_IN` | Access token TTL | No | No | `15m` |
 | `JWT_REFRESH_SECRET` | Refresh token signing key | Yes | **Yes** | `<different 32+ bytes>` |
@@ -185,7 +159,7 @@
 |---|---|---|---|---|
 | `PORT` | Express port | Yes | No | `3002` |
 | `NODE_ENV` | Runtime context | Yes | No | `production` |
-| `MONGO_URI` | MongoDB connection string | Yes | **Yes** | `mongodb://user:pass@db.fanvault.internal:27017/fanvault_db?authSource=admin` |
+| `MONGO_URI` | MongoDB connection string | Yes | **Yes** | `mongodb://user:pass@db.fanvault.internal:27017/fanvault_db?authSource=fanvault_db` |
 | `JWT_SECRET` | Access token verification key (must match Identity Service) | Yes | **Yes** | `<same value as Identity Service>` |
 | `CORS_ORIGIN` | Allowed client origins | Yes | No | `https://fanvault.example.com` |
 
@@ -314,11 +288,8 @@ Egress: All security groups allow all outbound (0.0.0.0/0) to enable NAT/npm ins
 | DNS Record | Type | Value | Resolves To |
 |---|---|---|---|
 | `db.fanvault.internal` | A | `10.0.31.100` | MongoDB EC2 private IP |
-| `auth-svc.fanvault.internal` | A | `10.0.21.10` | Identity Service EC2 private IP |
-| `commerce-svc.fanvault.internal` | A | `10.0.21.20` | Commerce Service EC2 private IP |
 
-> Update the A record values to match actual EC2 private IPs after provisioning.
-> If EC2 IPs change (stop/start), update only the Route53 record — no service code changes needed.
+> **Note on App Services:** Previously, we used `auth-svc` and `commerce-svc` private DNS records for Nginx. Since moving to an ALB-direct routing model, these are obsolete. The ALB balances traffic natively using Target Groups connected to Auto Scaling Groups.
 
 ---
 
@@ -326,12 +297,23 @@ Egress: All security groups allow all outbound (0.0.0.0/0) to enable NAT/npm ins
 
 | Service | Instance Type | vCPU | RAM | Storage | Notes |
 |---|---|---|---|---|---|
-| Frontend (Nginx) | `t3.small` | 2 | 2 GB | 20 GB gp3 | Scales horizontally with ALB |
-| Identity Service | `t3.small` | 2 | 2 GB | 20 GB gp3 | Stateless — can run 2 instances |
-| Commerce Service | `t3.small` | 2 | 2 GB | 20 GB gp3 | Stateless — can run 2 instances |
-| MongoDB | `t3.medium` | 2 | 4 GB | 50 GB gp3 | Increase to `t3.large` for production load |
+| Frontend (Nginx) | `t3.small` | 2 | 2 GB | 20 GB gp3 | Scales via ASG |
+| Identity Service | `t3.small` | 2 | 2 GB | 20 GB gp3 | Stateless — Scales via ASG |
+| Commerce Service | `t3.small` | 2 | 2 GB | 20 GB gp3 | Stateless — Scales via ASG |
+| MongoDB | `t3.medium` | 2 | 4 GB | 50 GB gp3 | Single instance / Primary DB |
 
 All instances: **Ubuntu 22.04 LTS** (HVM, SSD).
+
+---
+
+## Auto Scaling Strategy
+
+The architecture natively supports AWS Auto Scaling Groups (ASG) to handle high availability and load scaling without manual intervention:
+
+1. **AMIs:** You create Amazon Machine Images from your fully provisioned EC2 instances. Because systemd is enabled, the processes launch instantly on boot.
+2. **Launch Templates:** You define templates referencing these AMIs and the respective security groups (e.g., `fanvault-backend-sg`).
+3. **ASGs:** Spanning multiple subnets (`backend-private-1a`, `backend-private-1b`), ASGs ensure instances are balanced across Availability Zones.
+4. **Target Groups:** ASGs automatically register new instances directly with the ALB Target Groups (`fanvault-frontend-tg`, `fanvault-identity-tg`, `fanvault-commerce-tg`).
 
 ---
 
@@ -367,19 +349,19 @@ Startup dependency chain:
 ### Step 1 — MongoDB
 ```bash
 # From Bastion host or DB EC2
-mongosh "mongodb://dbuser:PASSWORD@db.fanvault.internal:27017/fanvault_db?authSource=admin" \
+mongosh "mongodb://dbuser:PASSWORD@db.fanvault.internal:27017/fanvault_db?authSource=fanvault_db" \
   --eval "db.adminCommand('ping')"
 # Expected: { ok: 1 }
 ```
 
 ### Step 2 — Identity Service
 ```bash
-# From Bastion or Frontend EC2 (within VPC)
-curl -s http://auth-svc.fanvault.internal:3001/health | python3 -m json.tool
+# From Identity EC2 instance
+curl -s http://localhost:3001/health | python3 -m json.tool
 # Expected: {"status":"ok","service":"fanvault-user-auth-service","timestamp":"..."}
 
-# Register a test user
-curl -s -X POST http://auth-svc.fanvault.internal:3001/api/auth/register \
+# Register a test user (via ALB)
+curl -s -X POST https://<alb-dns-name>/api/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email":"test@example.com","password":"Test@12345"}'
 # Expected: 201 with accessToken
@@ -387,21 +369,22 @@ curl -s -X POST http://auth-svc.fanvault.internal:3001/api/auth/register \
 
 ### Step 3 — Commerce Service
 ```bash
-curl -s http://commerce-svc.fanvault.internal:3002/health | python3 -m json.tool
+# From Commerce EC2 instance
+curl -s http://localhost:3002/health | python3 -m json.tool
 # Expected: {"status":"ok","service":"fanvault-commerce-service","timestamp":"..."}
 
-curl -s http://commerce-svc.fanvault.internal:3002/api/products | python3 -m json.tool
+# Test via ALB
+curl -s https://<alb-dns-name>/api/products | python3 -m json.tool
 # Expected: products array with 5 seeded items
 ```
 
 ### Step 4 — Frontend / Nginx
 ```bash
-# Test Nginx config
+# Test Nginx config on Frontend EC2
 nginx -t
 # Expected: syntax is ok / test is successful
 
-# Test proxy routes from the frontend EC2
-curl -s http://localhost/api/products | python3 -m json.tool
+# Test serving from Frontend EC2
 curl -s http://localhost/health
 # Expected: 200 OK responses
 ```
