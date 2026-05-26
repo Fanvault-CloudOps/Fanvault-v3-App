@@ -18,6 +18,7 @@
 ---
 
 ## ASCII Architecture Diagram
+<img width="3075" height="3263" alt="architecture png" src="https://github.com/user-attachments/assets/3fbbf997-773c-4d25-903a-7ec511e4112f" />
 
 ```text
                           ┌──────────────────────────────────────────────────────────────┐
