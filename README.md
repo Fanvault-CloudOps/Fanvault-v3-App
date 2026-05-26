@@ -17,7 +17,8 @@ Consolidated 3-microservice architecture extracted from the original FanVault 6-
 - **Email service removed** — order events are logged locally
 - **Private DNS** via Route53 Private Hosted Zone (`fanvault.internal`) — no `.local`, no hardcoded IPs
 - **Traditional EC2 deployment** — systemd + Nginx, no containers, no Kubernetes
-
+## Target Architecture
+<img width="3075" height="3263" alt="architecture png" src="https://github.com/user-attachments/assets/3fbbf997-773c-4d25-903a-7ec511e4112f" />
 ## Quick Start (Local Development)
 
 ```bash
