@@ -1,5 +1,9 @@
 const { validationResult } = require('express-validator');
 const Product = require('../models/Product');
+const { SSMClient, GetParameterCommand } = require("@aws-sdk/client-ssm");
+const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
+
+const ssm = new SSMClient({ region: process.env.AWS_REGION || "us-east-1" });
 
 // ── GET /api/products ────────────────────────────────────────────────────────
 exports.getProducts = async (req, res) => {
@@ -128,5 +132,66 @@ exports.deleteProduct = async (req, res) => {
   } catch (err) {
     console.error('[product] deleteProduct error:', err.message);
     res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// Helper to retrieve and cache S3 Bucket Name and Region from SSM Parameter Store
+let cachedBucketName = null;
+let cachedBucketRegion = null;
+
+async function getS3Config() {
+  if (cachedBucketName && cachedBucketRegion) {
+    return { bucket: cachedBucketName, region: cachedBucketRegion };
+  }
+
+  try {
+    console.log('[image] Fetching S3 configuration from SSM Parameter Store...');
+    const bucketResponse = await ssm.send(
+      new GetParameterCommand({ Name: process.env.SSM_S3_BUCKET_PATH || "/fanvault/s3/bucket" })
+    );
+    cachedBucketName = bucketResponse.Parameter.Value;
+
+    try {
+      const regionResponse = await ssm.send(
+        new GetParameterCommand({ Name: process.env.SSM_S3_REGION_PATH || "/fanvault/s3/region" })
+      );
+      cachedBucketRegion = regionResponse.Parameter.Value;
+    } catch (err) {
+      console.log('[image] S3 Region parameter not found in SSM, using default: us-east-1');
+      cachedBucketRegion = process.env.AWS_REGION || "us-east-1";
+    }
+
+    return { bucket: cachedBucketName, region: cachedBucketRegion };
+  } catch (error) {
+    console.error('[image] Error fetching S3 configuration from SSM:', error.message);
+    throw error;
+  }
+}
+
+// ── GET /api/products/images/:key — fetch and proxy image from S3 ───────────────
+exports.getProductImage = async (req, res) => {
+  try {
+    const key = req.params.key;
+    const { bucket, region } = await getS3Config();
+
+    const s3 = new S3Client({ region });
+    console.log(`[image] Fetching object '${key}' from S3 bucket '${bucket}'...`);
+    const s3Response = await s3.send(
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: key,
+      })
+    );
+
+    // Set headers and stream s3 object body to response
+    res.setHeader("Content-Type", s3Response.ContentType || "image/jpeg");
+    res.setHeader("Cache-Control", "public, max-age=31536000"); // Cache for 1 year
+    s3Response.Body.pipe(res);
+  } catch (err) {
+    console.error('[product] getProductImage error:', err.message);
+    if (err.name === 'NoSuchKey' || err.code === 'NoSuchKey') {
+      return res.status(404).json({ error: 'Image not found in S3 bucket' });
+    }
+    res.status(500).json({ error: 'Failed to retrieve image from S3 storage' });
   }
 };

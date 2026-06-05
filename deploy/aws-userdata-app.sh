@@ -19,7 +19,7 @@ REPO_URL="https://github.com/Savitxr/Fanvault-Mono.git"
 BRANCH="monolithic"
 
 # Database Connection Details (Point to the DB EC2 instance)
-DB_HOST="172.31.25.115"
+DB_HOST="172.31.18.208"
 DB_NAME="fanvault_db"
 DB_APP_USER="dbuser"
 DB_APP_PASSWORD="CHANGE_ME_STRONG_APP_PASSWORD"
@@ -30,7 +30,7 @@ JWT_SECRET="CHANGE_ME_STRONG_JWT_ACCESS_SECRET"
 JWT_REFRESH_SECRET="CHANGE_ME_STRONG_JWT_REFRESH_SECRET"
 
 # AWS Secrets Manager Configuration
-USE_SECRETS_MANAGER="false"
+USE_SECRETS_MANAGER="true"
 AWS_REGION="us-east-1"
 SECRET_ID="production/mongodb"
 
@@ -212,9 +212,35 @@ systemctl restart nginx
 
 # ── 9. Seed Consolidated Database ─────────────────────────────────────────────
 echo "[INFO] Waiting for database to be reachable..."
-# Retry pinging MongoDB database via Node.js script/commands or wait until port 27017 is open
-until nc -z -w5 "$DB_HOST" 27017; do
-  echo "Waiting for database port 27017 on $DB_HOST to open..."
+
+RESOLVED_DB_HOST="$DB_HOST"
+if [ "$USE_SECRETS_MANAGER" = "true" ]; then
+  echo "[INFO] USE_SECRETS_MANAGER is true. Resolving database host from Secrets Manager..."
+  # Install SDK temporarily to resolve the host
+  mkdir -p /tmp/resolve-db
+  cd /tmp/resolve-db
+  npm install @aws-sdk/client-secrets-manager > /dev/null 2>&1
+  
+  RESOLVED_DB_HOST=$(node -e "
+    const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
+    const client = new SecretsManagerClient({ region: '${AWS_REGION}' });
+    client.send(new GetSecretValueCommand({ SecretId: '${SECRET_ID}' }))
+      .then(res => {
+        const secret = JSON.parse(res.SecretString);
+        console.log(secret.host);
+        process.exit(0);
+      })
+      .catch(err => {
+        console.error(err);
+        process.exit(1);
+      });
+  " 2>/dev/null || echo "$DB_HOST")
+fi
+
+echo "[INFO] Target database host resolved to: $RESOLVED_DB_HOST"
+
+until nc -z -w5 "$RESOLVED_DB_HOST" 27017; do
+  echo "Waiting for database port 27017 on $RESOLVED_DB_HOST to open..."
   sleep 3
 done
 

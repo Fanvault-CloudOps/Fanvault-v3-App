@@ -8,6 +8,7 @@ const {
   updateProduct,
   deleteProduct,
   getProductsBulk,
+  getProductImage,
 } = require('../controllers/product.controller');
 
 const router = express.Router();
@@ -30,6 +31,7 @@ const productValidation = [
 // ── Public routes ─────────────────────────────────────────────────────────────
 router.get('/',      getProducts);
 router.get('/bulk',  getProductsBulk);
+router.get('/images/:key', getProductImage);
 router.get('/:id',   getProduct);
 
 // ── Admin-only routes ─────────────────────────────────────────────────────────
