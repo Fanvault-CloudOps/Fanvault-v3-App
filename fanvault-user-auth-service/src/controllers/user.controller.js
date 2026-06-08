@@ -1,10 +1,10 @@
 const { validationResult } = require('express-validator');
-const UserProfile = require('../models/UserProfile');
+const UserProfileRepository = require('../models/UserProfile');
 
 // ── GET /api/users/me ────────────────────────────────────────────────────────
 exports.getProfile = async (req, res) => {
   try {
-    const profile = await UserProfile.findOne({ authId: req.user.id });
+    const profile = await UserProfileRepository.findByUserId(req.user.id);
     if (!profile) return res.status(404).json({ error: 'Profile not found' });
     res.json({ profile });
   } catch (err) {
@@ -22,18 +22,23 @@ exports.createProfile = async (req, res) => {
 
     const { email, firstName, lastName } = req.body;
 
-    const existing = await UserProfile.findOne({ authId: req.user.id });
+    // Check if profile already exists
+    const existing = await UserProfileRepository.findByUserId(req.user.id);
     if (existing)
       return res.status(409).json({ error: 'Profile already exists' });
 
-    const profile = await UserProfile.create({
-      authId: req.user.id,
+    const profile = await UserProfileRepository.create({
+      userId:    req.user.id,
       email,
       firstName,
       lastName,
     });
+
     res.status(201).json({ message: 'Profile created', profile });
   } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException') {
+      return res.status(409).json({ error: 'Profile already exists' });
+    }
     console.error('[user] createProfile error:', err.message);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -46,20 +51,14 @@ exports.updateProfile = async (req, res) => {
     if (!errors.isEmpty())
       return res.status(400).json({ errors: errors.array() });
 
-    const allowedFields = ['firstName', 'lastName', 'phone', 'preferences'];
-    const updates = {};
-    allowedFields.forEach((field) => {
-      if (req.body[field] !== undefined) updates[field] = req.body[field];
-    });
+    const updated = await UserProfileRepository.update(req.user.id, req.body);
+    if (!updated) return res.status(404).json({ error: 'Profile not found' });
 
-    const profile = await UserProfile.findOneAndUpdate(
-      { authId: req.user.id },
-      updates,
-      { new: true, runValidators: true }
-    );
-    if (!profile) return res.status(404).json({ error: 'Profile not found' });
-    res.json({ message: 'Profile updated', profile });
+    res.json({ message: 'Profile updated', profile: updated });
   } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException') {
+      return res.status(404).json({ error: 'Profile not found' });
+    }
     console.error('[user] updateProfile error:', err.message);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -72,16 +71,10 @@ exports.addAddress = async (req, res) => {
     if (!errors.isEmpty())
       return res.status(400).json({ errors: errors.array() });
 
-    const profile = await UserProfile.findOne({ authId: req.user.id });
-    if (!profile) return res.status(404).json({ error: 'Profile not found' });
+    const updated = await UserProfileRepository.addAddress(req.user.id, req.body);
+    if (!updated) return res.status(404).json({ error: 'Profile not found' });
 
-    // Clear other defaults if this is set as default
-    if (req.body.isDefault) {
-      profile.addresses.forEach((addr) => (addr.isDefault = false));
-    }
-    profile.addresses.push(req.body);
-    await profile.save();
-    res.status(201).json({ message: 'Address added', addresses: profile.addresses });
+    res.status(201).json({ message: 'Address added', addresses: updated.addresses });
   } catch (err) {
     console.error('[user] addAddress error:', err.message);
     res.status(500).json({ error: 'Internal server error' });
@@ -91,14 +84,13 @@ exports.addAddress = async (req, res) => {
 // ── DELETE /api/users/me/addresses/:addressId ────────────────────────────────
 exports.removeAddress = async (req, res) => {
   try {
-    const profile = await UserProfile.findOne({ authId: req.user.id });
-    if (!profile) return res.status(404).json({ error: 'Profile not found' });
-
-    profile.addresses = profile.addresses.filter(
-      (a) => a._id.toString() !== req.params.addressId
+    const updated = await UserProfileRepository.removeAddress(
+      req.user.id,
+      req.params.addressId
     );
-    await profile.save();
-    res.json({ message: 'Address removed', addresses: profile.addresses });
+    if (!updated) return res.status(404).json({ error: 'Profile not found' });
+
+    res.json({ message: 'Address removed', addresses: updated.addresses });
   } catch (err) {
     console.error('[user] removeAddress error:', err.message);
     res.status(500).json({ error: 'Internal server error' });

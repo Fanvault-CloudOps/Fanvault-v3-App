@@ -1,6 +1,6 @@
-const jwt = require('jsonwebtoken');
+const jwt       = require('jsonwebtoken');
 const { validationResult } = require('express-validator');
-const User = require('../models/User');
+const UserRepository = require('../models/User');
 
 // ── Token generation helper ──────────────────────────────────────────────────
 const generateTokens = (userId, role) => {
@@ -26,18 +26,19 @@ exports.register = async (req, res) => {
 
     const { email, password } = req.body;
 
-    const existingUser = await User.findOne({ email });
-    if (existingUser)
+    // Check if email already registered via GSI
+    const existing = await UserRepository.findByEmail(email);
+    if (existing)
       return res.status(409).json({ error: 'Email already registered' });
 
-    const user = await User.create({ email, password });
-    const { accessToken, refreshToken } = generateTokens(user._id, user.role);
+    const user = await UserRepository.create({ email, password });
+    const { accessToken, refreshToken } = generateTokens(user.userId, user.role);
 
     res.status(201).json({
       message: 'Registration successful',
       accessToken,
       refreshToken,
-      user: { id: user._id, email: user.email, role: user.role },
+      user: { id: user.userId, email: user.email, role: user.role },
     });
   } catch (err) {
     console.error('[auth] register error:', err.message);
@@ -53,24 +54,31 @@ exports.login = async (req, res) => {
       return res.status(400).json({ errors: errors.array() });
 
     const { email, password } = req.body;
-    const user = await User.findOne({ email }).select('+password');
+    const user = await UserRepository.findByEmail(email);
 
-    if (!user || !(await user.comparePassword(password)))
+    // Constant-time: always call comparePassword even if user not found
+    const dummyHash = '$2a$12$dummyhashtopreventtimingattacks.AAAAAAAAAAAAAAAAAAAAAA';
+    const passwordHash = user?.passwordHash || dummyHash;
+    const isMatch = await UserRepository.comparePassword(password, passwordHash);
+
+    if (!user || !isMatch)
       return res.status(401).json({ error: 'Invalid email or password' });
 
     if (!user.isActive)
       return res.status(403).json({ error: 'Account deactivated' });
 
-    user.lastLogin = new Date();
-    await user.save({ validateBeforeSave: false });
+    // Update lastLogin timestamp (non-blocking — don't await)
+    UserRepository.updateLastLogin(user.userId).catch((e) =>
+      console.warn('[auth] lastLogin update failed:', e.message)
+    );
 
-    const { accessToken, refreshToken } = generateTokens(user._id, user.role);
+    const { accessToken, refreshToken } = generateTokens(user.userId, user.role);
 
     res.json({
       message: 'Login successful',
       accessToken,
       refreshToken,
-      user: { id: user._id, email: user.email, role: user.role },
+      user: { id: user.userId, email: user.email, role: user.role },
     });
   } catch (err) {
     console.error('[auth] login error:', err.message);
@@ -98,14 +106,13 @@ exports.refresh = (req, res) => {
 };
 
 // ── GET /api/auth/verify ─────────────────────────────────────────────────────
-// Used optionally by external clients to check token validity
 exports.verify = (req, res) => {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer '))
       return res.status(401).json({ valid: false, error: 'No token provided' });
 
-    const token = authHeader.split(' ')[1];
+    const token   = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     res.json({ valid: true, user: { id: decoded.id, role: decoded.role } });
   } catch (err) {
@@ -114,7 +121,7 @@ exports.verify = (req, res) => {
 };
 
 // ── POST /api/auth/logout ────────────────────────────────────────────────────
-// Stateless — client is responsible for discarding stored tokens
+// Stateless — client discards stored tokens
 exports.logout = (req, res) => {
   res.json({ message: 'Logged out successfully' });
 };

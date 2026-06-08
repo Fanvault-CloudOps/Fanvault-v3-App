@@ -1,5 +1,5 @@
 const { validationResult } = require('express-validator');
-const Order = require('../models/Order');
+const OrderRepository = require('../models/Order');
 
 // ── Internal: log order event locally (email service omitted) ────────────────
 const logOrderEvent = (eventType, order) => {
@@ -15,7 +15,7 @@ const logOrderEvent = (eventType, order) => {
   );
 };
 
-// ── POST /api/orders ─────────────────────────────────────────────────────────
+// ── POST /api/orders ──────────────────────────────────────────────────────────
 exports.createOrder = async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -30,7 +30,7 @@ exports.createOrder = async (req, res) => {
     const tax          = Math.round(subtotal * 0.18);
     const total        = subtotal + shippingCost + tax;
 
-    const order = await Order.create({
+    const order = await OrderRepository.create({
       userId:          req.user.id,
       userEmail:       userEmail || req.user.email,
       items,
@@ -41,12 +41,9 @@ exports.createOrder = async (req, res) => {
       total,
       paymentMethod:   paymentMethod || 'cod',
       notes,
-      notificationSent: true, // No external email service — mark as handled
     });
 
-    // Log the order event for audit trail (replaces email notification)
     logOrderEvent('ORDER_PLACED', order);
-
     res.status(201).json({ message: 'Order placed successfully', order });
   } catch (err) {
     console.error('[order] createOrder error:', err.message);
@@ -57,18 +54,27 @@ exports.createOrder = async (req, res) => {
 // ── GET /api/orders/my — paginated user order history ────────────────────────
 exports.getMyOrders = async (req, res) => {
   try {
-    const { page = 1, limit = 10 } = req.query;
-    const skip = (Number(page) - 1) * Number(limit);
-    const [orders, total] = await Promise.all([
-      Order.find({ userId: req.user.id })
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(Number(limit)),
-      Order.countDocuments({ userId: req.user.id }),
-    ]);
+    const { limit = 10, lastKey: rawKey } = req.query;
+
+    let lastKey;
+    try {
+      lastKey = rawKey ? JSON.parse(Buffer.from(rawKey, 'base64').toString()) : undefined;
+    } catch {
+      lastKey = undefined;
+    }
+
+    const { orders, lastKey: nextKey, hasMore } = await OrderRepository.findByUserId(
+      req.user.id,
+      { limit: Number(limit), lastKey }
+    );
+
     res.json({
       orders,
-      pagination: { total, page: Number(page), pages: Math.ceil(total / Number(limit)) },
+      pagination: {
+        count:   orders.length,
+        hasMore,
+        nextKey: nextKey ? Buffer.from(JSON.stringify(nextKey)).toString('base64') : null,
+      },
     });
   } catch (err) {
     console.error('[order] getMyOrders error:', err.message);
@@ -76,13 +82,16 @@ exports.getMyOrders = async (req, res) => {
   }
 };
 
-// ── GET /api/orders/:id — user or admin ──────────────────────────────────────
+// ── GET /api/orders/:id — user or admin ───────────────────────────────────────
 exports.getOrder = async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id);
+    const order = await OrderRepository.findById(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    // Users can only see their own orders; admins can see all
     if (order.userId !== req.user.id && req.user.role !== 'admin')
       return res.status(403).json({ error: 'Forbidden' });
+
     res.json({ order });
   } catch (err) {
     console.error('[order] getOrder error:', err.message);
@@ -90,19 +99,31 @@ exports.getOrder = async (req, res) => {
   }
 };
 
-// ── GET /api/orders — admin: all orders with pagination and status filter ─────
+// ── GET /api/orders — admin: all orders with optional status filter ────────────
 exports.getAllOrders = async (req, res) => {
   try {
-    const { page = 1, limit = 20, status } = req.query;
-    const query = status ? { status } : {};
-    const skip  = (Number(page) - 1) * Number(limit);
-    const [orders, total] = await Promise.all([
-      Order.find(query).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
-      Order.countDocuments(query),
-    ]);
+    const { status, limit = 20, lastKey: rawKey } = req.query;
+
+    let lastKey;
+    try {
+      lastKey = rawKey ? JSON.parse(Buffer.from(rawKey, 'base64').toString()) : undefined;
+    } catch {
+      lastKey = undefined;
+    }
+
+    const { orders, lastKey: nextKey, hasMore } = await OrderRepository.findAll({
+      status,
+      limit: Number(limit),
+      lastKey,
+    });
+
     res.json({
       orders,
-      pagination: { total, page: Number(page), pages: Math.ceil(total / Number(limit)) },
+      pagination: {
+        count:   orders.length,
+        hasMore,
+        nextKey: nextKey ? Buffer.from(JSON.stringify(nextKey)).toString('base64') : null,
+      },
     });
   } catch (err) {
     console.error('[order] getAllOrders error:', err.message);
@@ -114,20 +135,13 @@ exports.getAllOrders = async (req, res) => {
 exports.updateOrderStatus = async (req, res) => {
   try {
     const { status, paymentStatus } = req.body;
-    const update = {};
-    if (status)        update.status        = status;
-    if (paymentStatus) update.paymentStatus = paymentStatus;
-
-    const order = await Order.findByIdAndUpdate(req.params.id, update, {
-      new:          true,
-      runValidators: true,
-    });
-    if (!order) return res.status(404).json({ error: 'Order not found' });
+    const order = await OrderRepository.updateStatus(req.params.id, { status, paymentStatus });
 
     if (status === 'confirmed') logOrderEvent('ORDER_CONFIRMED', order);
-
     res.json({ message: 'Order updated', order });
   } catch (err) {
+    if (err.name === 'ConditionalCheckFailedException')
+      return res.status(404).json({ error: 'Order not found' });
     console.error('[order] updateOrderStatus error:', err.message);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -136,20 +150,20 @@ exports.updateOrderStatus = async (req, res) => {
 // ── POST /api/orders/:id/cancel — user cancel (before shipped) ───────────────
 exports.cancelOrder = async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id);
+    // Verify ownership first
+    const order = await OrderRepository.findById(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
     if (order.userId !== req.user.id && req.user.role !== 'admin')
       return res.status(403).json({ error: 'Forbidden' });
 
-    if (['shipped', 'delivered'].includes(order.status))
-      return res.status(400).json({ error: 'Order cannot be cancelled at this stage' });
-
-    order.status = 'cancelled';
-    await order.save();
-    logOrderEvent('ORDER_CANCELLED', order);
-    res.json({ message: 'Order cancelled', order });
+    // Cancel with atomic DynamoDB conditional expression
+    const cancelled = await OrderRepository.cancel(req.params.id);
+    logOrderEvent('ORDER_CANCELLED', cancelled);
+    res.json({ message: 'Order cancelled', order: cancelled });
   } catch (err) {
+    if (err.code === 'CANCEL_FORBIDDEN')
+      return res.status(400).json({ error: 'Order cannot be cancelled at this stage' });
     console.error('[order] cancelOrder error:', err.message);
     res.status(500).json({ error: 'Internal server error' });
   }
