@@ -58,7 +58,7 @@ export default function OrdersPage() {
         ) : (
           <div className="orders-list">
             {orders.map((order) => (
-              <Link key={order._id} to={`/orders/${order._id}`} className="order-card card">
+              <Link key={order._id || order.orderId} to={`/orders/${order._id || order.orderId}`} className="order-card card">
                 <div className="order-card-header">
                   <div className="order-number">
                     <span className="order-label">Order</span>

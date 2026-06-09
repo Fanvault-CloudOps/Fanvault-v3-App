@@ -160,14 +160,14 @@ export default function ProfilePage() {
               ) : (
                 <div className="addresses-list">
                   {profile.addresses.map((addr) => (
-                    <div key={addr._id} className={`address-card ${addr.isDefault ? 'default' : ''}`}>
+                    <div key={addr._id || addr.addressId} className={`address-card ${addr.isDefault ? 'default' : ''}`}>
                       <div className="address-info">
                         {addr.isDefault && <span className="badge badge-green" style={{ marginBottom: 6 }}>Default</span>}
                         <p>{addr.line1}{addr.line2 ? `, ${addr.line2}` : ''}</p>
                         <p>{addr.city}, {addr.state} – {addr.postalCode}</p>
                         <p>{addr.country}</p>
                       </div>
-                      <button className="btn btn-ghost btn-sm remove-addr-btn" onClick={() => handleRemoveAddress(addr._id)}>
+                      <button className="btn btn-ghost btn-sm remove-addr-btn" onClick={() => handleRemoveAddress(addr._id || addr.addressId)}>
                         <Trash2 size={14} />
                       </button>
                     </div>

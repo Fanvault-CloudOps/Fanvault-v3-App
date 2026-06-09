@@ -85,7 +85,7 @@ export default function CheckoutPage() {
             <p className="success-email">A confirmation email has been sent to <strong>{user.email}</strong></p>
             <div className="success-total">Total: ₹{orderPlaced.total?.toLocaleString('en-IN')}</div>
             <div className="success-actions">
-              <button className="btn btn-primary btn-lg" onClick={() => navigate(`/orders/${orderPlaced._id}`)}>
+              <button className="btn btn-primary btn-lg" onClick={() => navigate(`/orders/${orderPlaced._id || orderPlaced.orderId}`)}>
                 <Package size={18} /> View Order
               </button>
               <button className="btn btn-secondary btn-lg" onClick={() => navigate('/products')}>

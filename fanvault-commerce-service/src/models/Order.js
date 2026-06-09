@@ -53,7 +53,7 @@ const OrderRepository = {
       })
     );
 
-    return order;
+    return { ...order, _id: order.orderId };
   },
 
   // ── Get a single order by orderId ───────────────────────────────────────────
@@ -64,7 +64,7 @@ const OrderRepository = {
         Key:       { orderId },
       })
     );
-    return result.Item || null;
+    return result.Item ? { ...result.Item, _id: result.Item.orderId } : null;
   },
 
   // ── Get paginated orders for a user (userId-createdAt-index GSI) ────────────
@@ -82,8 +82,10 @@ const OrderRepository = {
       })
     );
 
+    const mappedOrders = (result.Items || []).map(o => ({ ...o, _id: o.orderId }));
+
     return {
-      orders:  result.Items || [],
+      orders:  mappedOrders,
       lastKey: result.LastEvaluatedKey || null,
       hasMore: !!result.LastEvaluatedKey,
     };
@@ -118,8 +120,10 @@ const OrderRepository = {
       );
     }
 
+    const mappedOrders = (result.Items || []).map(o => ({ ...o, _id: o.orderId }));
+
     return {
-      orders:  result.Items || [],
+      orders:  mappedOrders,
       lastKey: result.LastEvaluatedKey || null,
       hasMore: !!result.LastEvaluatedKey,
     };
@@ -153,30 +157,30 @@ const OrderRepository = {
       })
     );
 
-    return result.Attributes;
+    return result.Attributes ? { ...result.Attributes, _id: result.Attributes.orderId } : null;
   },
 
   // ── Cancel an order (with guard: cannot cancel shipped/delivered) ───────────
   async cancel(orderId) {
     try {
-      const result = await getDocClient().send(
-        new UpdateCommand({
-          TableName:        TABLE(),
-          Key:              { orderId },
-          UpdateExpression: 'SET #status = :cancelled, updatedAt = :now',
-          // Conditional: only cancel if status is NOT shipped or delivered
-          ConditionExpression:       'attribute_exists(orderId) AND #status <> :shipped AND #status <> :delivered',
-          ExpressionAttributeNames:  { '#status': 'status' },
-          ExpressionAttributeValues: {
-            ':cancelled': 'cancelled',
-            ':shipped':   'shipped',
-            ':delivered': 'delivered',
-            ':now':       new Date().toISOString(),
-          },
-          ReturnValues: 'ALL_NEW',
-        })
-      );
-      return result.Attributes;
+        const result = await getDocClient().send(
+          new UpdateCommand({
+            TableName:        TABLE(),
+            Key:              { orderId },
+            UpdateExpression: 'SET #status = :cancelled, updatedAt = :now',
+            // Conditional: only cancel if status is NOT shipped or delivered
+            ConditionExpression:       'attribute_exists(orderId) AND #status <> :shipped AND #status <> :delivered',
+            ExpressionAttributeNames:  { '#status': 'status' },
+            ExpressionAttributeValues: {
+              ':cancelled': 'cancelled',
+              ':shipped':   'shipped',
+              ':delivered': 'delivered',
+              ':now':       new Date().toISOString(),
+            },
+            ReturnValues: 'ALL_NEW',
+          })
+        );
+        return result.Attributes ? { ...result.Attributes, _id: result.Attributes.orderId } : null;
     } catch (err) {
       if (err.name === 'ConditionalCheckFailedException') {
         const conflict = new Error('Order cannot be cancelled at this stage');
