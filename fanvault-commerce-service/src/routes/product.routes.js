@@ -36,11 +36,11 @@ router.get('/upload-url', authenticate, adminOnly, getUploadUrl);
 router.get('/',      getProducts);
 router.get('/bulk',  getProductsBulk);
 router.get('/images/:key(*)', getProductImage);
-router.get('/:id',   getProduct);
+router.get('/:productId',   getProduct);
 
 // ── Admin-only routes ─────────────────────────────────────────────────────────
 router.post('/',     authenticate, adminOnly, productValidation, createProduct);
-router.patch('/:id', authenticate, adminOnly, updateProduct);
-router.delete('/:id',authenticate, adminOnly, deleteProduct);
+router.patch('/:productId', authenticate, adminOnly, updateProduct);
+router.delete('/:productId',authenticate, adminOnly, deleteProduct);
 
 module.exports = router;

@@ -12,6 +12,11 @@ const ssm = new SSMClient({ region: process.env.AWS_REGION || 'us-east-1' });
 function formatProductImageUrls(product, cloudfrontUrl) {
   if (!product) return product;
   const mapped = { ...product };
+  
+  // Map identifier fields for frontend compatibility (DynamoDB uses productId)
+  mapped._id = product.productId;
+  mapped.id = product.productId;
+
   if (Array.isArray(mapped.images)) {
     mapped.images = mapped.images.map((img) => {
       if (!img) return img;
@@ -138,10 +143,10 @@ exports.getProductsBulk = async (req, res) => {
   }
 };
 
-// ── GET /api/products/:id ─────────────────────────────────────────────────────
+// ── GET /api/products/:productId ──────────────────────────────────────────────
 exports.getProduct = async (req, res) => {
   try {
-    const product = await ProductRepository.findById(req.params.id);
+    const product = await ProductRepository.findById(req.params.productId);
     if (!product) return res.status(404).json({ error: 'Product not found' });
     const { cloudfrontUrl } = await getS3Config();
     res.json({ product: formatProductImageUrls(product, cloudfrontUrl) });
@@ -176,7 +181,7 @@ exports.createProduct = async (req, res) => {
   }
 };
 
-// ── PATCH /api/products/:id — admin only ─────────────────────────────────────
+// ── PATCH /api/products/:productId — admin only ──────────────────────────────
 exports.updateProduct = async (req, res) => {
   try {
     const { cloudfrontUrl } = await getS3Config();
@@ -186,9 +191,9 @@ exports.updateProduct = async (req, res) => {
       req.body.images = extractImageKeys(req.body.images, cloudfrontUrl);
     }
 
-    const product = await ProductRepository.update(req.params.id, req.body);
+    const product = await ProductRepository.update(req.params.productId, req.body);
     if (!product) return res.status(404).json({ error: 'Product not found' });
-    logAuditEvent({ adminId: req.user.id, adminEmail: req.user.email, action: 'PRODUCT_UPDATED', entityType: 'product', entityId: req.params.id, changes: req.body });
+    logAuditEvent({ adminId: req.user.id, adminEmail: req.user.email, action: 'PRODUCT_UPDATED', entityType: 'product', entityId: req.params.productId, changes: req.body });
     res.json({ message: 'Product updated', product: formatProductImageUrls(product, cloudfrontUrl) });
   } catch (err) {
     if (err.name === 'ConditionalCheckFailedException')
@@ -198,12 +203,12 @@ exports.updateProduct = async (req, res) => {
   }
 };
 
-// ── DELETE /api/products/:id — admin only (soft-delete) ──────────────────────
+// ── DELETE /api/products/:productId — admin only (soft-delete) ───────────────
 exports.deleteProduct = async (req, res) => {
   try {
-    const product = await ProductRepository.softDelete(req.params.id);
+    const product = await ProductRepository.softDelete(req.params.productId);
     if (!product) return res.status(404).json({ error: 'Product not found' });
-    logAuditEvent({ adminId: req.user.id, adminEmail: req.user.email, action: 'PRODUCT_DELETED', entityType: 'product', entityId: req.params.id });
+    logAuditEvent({ adminId: req.user.id, adminEmail: req.user.email, action: 'PRODUCT_DELETED', entityType: 'product', entityId: req.params.productId });
     const { cloudfrontUrl } = await getS3Config();
     res.json({ message: 'Product deactivated', product: formatProductImageUrls(product, cloudfrontUrl) });
   } catch (err) {
