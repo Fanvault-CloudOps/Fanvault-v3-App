@@ -85,6 +85,31 @@ exports.createOrder = async (req, res) => {
     res.status(201).json({ message: 'Order placed successfully', order });
   } catch (err) {
     console.error('[order] createOrder error:', err.message);
+    
+    // Publish structured order failure alert to SNS
+    const topicArn = process.env.SNS_TOPIC_ORDER_FAILURE;
+    if (topicArn) {
+      try {
+        const { publishAlert } = require('../utils/snsPublisher');
+        publishAlert(topicArn, {
+          service: 'fanvault-commerce-service',
+          eventType: 'OrderProcessingFailure',
+          resource: req.user ? `User:${req.user.id}` : 'Guest',
+          severity: 'ERROR',
+          correlationId: req.headers['x-correlation-id'] || 'system',
+          details: {
+            errorMessage: err.message,
+            stackTrace: err.stack ? err.stack.split('\n').slice(0, 3).join('\n') : '',
+            requestBody: req.body,
+            userId: req.user ? req.user.id : null,
+            userEmail: req.user ? req.user.email : null
+          }
+        });
+      } catch (snsErr) {
+        console.error('[order] Failed to send order failure alert to SNS:', snsErr.message);
+      }
+    }
+
     res.status(500).json({ error: 'Internal server error' });
   }
 };
