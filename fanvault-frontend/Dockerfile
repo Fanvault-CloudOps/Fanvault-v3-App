@@ -1,0 +1,65 @@
+# ── Build Stage ───────────────────────────────────────────────────────────────
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+
+# Copy package configurations
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy application source code
+COPY . .
+
+# Build Vite React production bundle
+RUN npm run build
+
+# ── Runtime Stage ─────────────────────────────────────────────────────────────
+FROM nginx:1.25-alpine
+
+# Update packages and clean apk cache
+RUN apk update && apk upgrade --no-cache && rm -rf /var/cache/apk/*
+
+# Remove default configurations
+RUN rm /etc/nginx/conf.d/default.conf
+
+# Copy build output to Nginx HTML root directory
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Copy configuration template for environment variable interpolation on startup
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+
+# Create standard non-root user and group, adjust file ownership and setup folders
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup && \
+    chown -R appuser:appgroup /usr/share/nginx/html && \
+    mkdir -p /var/cache/nginx/client_temp \
+             /var/cache/nginx/proxy_temp \
+             /var/cache/nginx/fastcgi_temp \
+             /var/cache/nginx/uwsgi_temp \
+             /var/cache/nginx/scgi_temp && \
+    chown -R appuser:appgroup /var/cache/nginx \
+                             /var/log/nginx \
+                             /etc/nginx/conf.d \
+                             /etc/nginx/templates && \
+    touch /var/run/nginx.pid && \
+    chown appuser:appgroup /var/run/nginx.pid
+
+# Default environment variables for template rendering
+ENV IDENTITY_SERVICE_HOST=identity-service
+ENV IDENTITY_SERVICE_PORT=3001
+ENV COMMERCE_SERVICE_HOST=commerce-service
+ENV COMMERCE_SERVICE_PORT=3002
+
+# Run as non-root user
+USER appuser
+
+# Expose HTTP port
+EXPOSE 80
+
+# Healthcheck configuration using built-in wget spidering
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget --quiet --tries=1 --spider http://localhost/health || exit 1
+
+# Start Nginx
+CMD ["nginx", "-g", "daemon off;"]
