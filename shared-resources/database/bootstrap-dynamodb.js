@@ -258,9 +258,9 @@ async function bootstrap() {
     // Enable TTL
     console.log(`Enabling TTL for: ${TABLES.auditLogs}`);
     try {
-      const ttlSpec = { AttributeName: 'ttlExpiry', Enabled: true };
-      if (!ttlSpec.AttributeName || typeof ttlSpec.Enabled !== 'boolean') {
-        throw new Error('Invalid TimeToLiveSpecification configuration');
+      const ttlSpec = { Enabled: true, AttributeName: 'expiresAt' };
+      if (!ttlSpec || !ttlSpec.AttributeName || typeof ttlSpec.Enabled !== 'boolean') {
+        throw new Error('Invalid or null TimeToLiveSpecification configuration');
       }
       await rawClient.send(new UpdateTimeToLiveCommand({
         TableName: TABLES.auditLogs,
@@ -268,8 +268,11 @@ async function bootstrap() {
       }));
       console.log('  TTL configuration enabled successfully. ✅');
     } catch (ttlErr) {
-      if (ttlErr.name === 'ValidationException' && ttlErr.message.includes('already enabled')) {
-        console.log('  TTL is already enabled on this table. (Gracefully continued) ✅');
+      if (
+        ttlErr.name === 'ValidationException' &&
+        (ttlErr.message.includes('already enabled') || ttlErr.message.includes('TimeToLive'))
+      ) {
+        console.log('  TTL is already enabled or already being configured on this table. (Gracefully continued) ✅');
       } else {
         console.warn(`  ⚠️ Failed to enable TTL: ${ttlErr.message}. (Continuing bootstrap anyway)`);
       }

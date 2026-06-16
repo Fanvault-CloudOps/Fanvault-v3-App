@@ -46,8 +46,8 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup && \
     chown appuser:appgroup /var/run/nginx.pid
 
 # Default environment variables for template rendering
-ENV IDENTITY_SERVICE_HOST=identity-service
-ENV IDENTITY_SERVICE_PORT=3001
+ENV USER_SERVICE_HOST=user-service
+ENV USER_SERVICE_PORT=3001
 ENV COMMERCE_SERVICE_HOST=commerce-service
 ENV COMMERCE_SERVICE_PORT=3002
 

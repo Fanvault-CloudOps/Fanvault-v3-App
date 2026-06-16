@@ -65,14 +65,17 @@ try {
     $success = $false
 }
 
-# Identity Service Check (via Nginx proxy)
+# User Service Check (via Nginx proxy)
 try {
-    $idResponse = Invoke-RestMethod -Uri "http://localhost/health" -Method Get -Headers @{ "Host" = "localhost" } -TimeoutSec 5
-    # Since health endpoint returns JSON direct or via container, we check:
-    Write-Host "✅ Identity routing check succeeded." -ForegroundColor Green
+    $idResponse = Invoke-RestMethod -Uri "http://localhost/api/users/me" -Method Get -TimeoutSec 5
+    Write-Host "✅ User Service routing check succeeded." -ForegroundColor Green
 } catch {
-    Write-Host "❌ Identity Routing check failed ($($_.Exception.Message))" -ForegroundColor Red
-    $success = $false
+    if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -in 401, 403) {
+        Write-Host "✅ User Service routing check succeeded (Returned 401/403 as expected)." -ForegroundColor Green
+    } else {
+        Write-Host "❌ User Service Routing check failed ($($_.Exception.Message))" -ForegroundColor Red
+        $success = $false
+    }
 }
 
 # Commerce Service Check (via Nginx proxy)

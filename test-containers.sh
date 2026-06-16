@@ -75,12 +75,11 @@ else
     success=false
 fi
 
-# Identity Routing Check (via Nginx proxy)
-if curl -s -f http://localhost/api/auth/register > /dev/null 2>&1 || [ $? -eq 22 ] || [ $? -eq 0 ]; then
-    # Accept 400 Bad Request / 405 Method Not Allowed as valid proxy endpoint responses
-    echo -e "${GREEN}✅ Identity routing check succeeded.${CLEAR}"
+# User Service Routing Check (via Nginx proxy)
+if curl -s -I http://localhost/api/users/me | grep -qE "401|403"; then
+    echo -e "${GREEN}✅ User Service routing check succeeded (Returned 401/403 as expected).${CLEAR}"
 else
-    echo -e "${RED}❌ Identity Routing check failed${CLEAR}"
+    echo -e "${RED}❌ User Service Routing check failed${CLEAR}"
     success=false
 fi
 

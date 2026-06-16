@@ -52,13 +52,13 @@ async function initDynamoDB() {
     }
   }
 
-  // Health-check: confirm the users table is reachable
-  const usersTable = process.env.DYNAMODB_TABLE_USERS || 'fanvault-users';
+  // Health-check: confirm the profiles table is reachable
+  const profilesTable = process.env.DYNAMODB_TABLE_PROFILES || 'fanvault-profiles';
   try {
-    await docClient.send(new DescribeTableCommand({ TableName: usersTable }));
-    console.log(`✅ DynamoDB connected — table "${usersTable}" is accessible.`);
+    await docClient.send(new DescribeTableCommand({ TableName: profilesTable }));
+    console.log(`✅ DynamoDB connected — table "${profilesTable}" is accessible.`);
   } catch (err) {
-    console.error(`❌ DynamoDB health-check failed for table "${usersTable}":`, err.message);
+    console.error(`❌ DynamoDB health-check failed for table "${profilesTable}":`, err.message);
     throw err; // Fatal — crash fast on startup if DynamoDB is unreachable
   }
 }
