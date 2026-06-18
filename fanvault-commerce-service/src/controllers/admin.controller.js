@@ -205,3 +205,60 @@ exports.deactivateMetadata = async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 };
+
+// ── POST /api/admin/generate-metadata ─────────────────────────────────────────
+const axios = require('axios');
+
+const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://ai-service:8000';
+
+exports.generateMetadata = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const { imageKey } = req.body;
+
+    let aiResponse;
+    try {
+      const { data } = await axios.post(
+        `${AI_SERVICE_URL}/generate-metadata`,
+        { imageKey },
+        { timeout: 35000 }
+      );
+      aiResponse = data;
+    } catch (httpErr) {
+      const status = httpErr.response?.status;
+      const body   = httpErr.response?.data;
+      if (status === 400) return res.status(400).json(body || { error: 'Invalid image key' });
+      if (status === 503) return res.status(503).json(body || { success: false, error: 'AI_UNAVAILABLE' });
+      return res.status(503).json({ success: false, error: 'AI_UNAVAILABLE', message: httpErr.message });
+    }
+
+    if (!aiResponse.success) {
+      return res.status(503).json({
+        success: false,
+        error:   aiResponse.error,
+        details: aiResponse.details,
+      });
+    }
+
+    logAuditEvent({
+      adminId:    req.user.id,
+      adminEmail: req.user.email,
+      action:     'AI_METADATA_GENERATED',
+      entityType: 'product',
+      entityId:   imageKey,
+      changes:    { provider: aiResponse.provider, latencyMs: aiResponse.latencyMs },
+    });
+
+    res.json({
+      success:   true,
+      data:      aiResponse.data,
+      provider:  aiResponse.provider,
+      latencyMs: aiResponse.latencyMs,
+    });
+  } catch (err) {
+    console.error('[admin] generateMetadata error:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};

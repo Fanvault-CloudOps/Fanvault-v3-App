@@ -8,6 +8,7 @@ const {
   getMetadata,
   upsertMetadata,
   deactivateMetadata,
+  generateMetadata,
 } = require('../controllers/admin.controller');
 
 const router = express.Router();
@@ -31,5 +32,12 @@ router.post('/metadata/:metaType', [
   body('displayName').notEmpty().withMessage('displayName is required'),
 ], upsertMetadata);
 router.delete('/metadata/:metaType/:metaId', deactivateMetadata);
+
+// ── AI Product Metadata Generation ───────────────────────────────────────────
+router.post('/generate-metadata', [
+  body('imageKey')
+    .notEmpty().withMessage('imageKey is required')
+    .matches(/^products\/[a-zA-Z0-9\-_.\/]+$/).withMessage('imageKey must start with products/ and contain only safe characters'),
+], generateMetadata);
 
 module.exports = router;

@@ -1,0 +1,101 @@
+name: Rollback Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to roll back'
+        required: true
+        type: choice
+        options:
+          - user-service
+          - commerce-service
+          - frontend
+          - ai-service
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      image_tag:
+        description: 'Image tag to roll back to (e.g. sha-abc1234 or v1.2.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  rollback-dev:
+    if: github.event.inputs.environment == 'dev'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Roll back ${{ github.event.inputs.service }} in dev
+        env:
+          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+          SERVICE: ${{ github.event.inputs.service }}
+        run: |
+          git clone https://x-access-token:${{ secrets.GITOPS_PAT }}@github.com/Savitxr/fanvault-gitops.git
+          cd fanvault-gitops
+
+          wget -q https://github.com/mikefarah/yq/releases/download/v4.44.2/yq_linux_amd64 \
+            -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+
+          VALUES_FILE="environments/dev/values-${SERVICE}.yaml"
+          yq e '.image.tag = env(IMAGE_TAG)' -i "${VALUES_FILE}"
+
+          git config user.email "ci@fanvault.internal"
+          git config user.name "FanVault CI"
+          git add "${VALUES_FILE}"
+          git diff --staged --quiet || git commit -m "ci: rollback ${SERVICE} to ${IMAGE_TAG} in dev [skip ci]"
+          git push
+
+      - name: Rollback summary
+        run: |
+          echo "### Rollback Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | ${{ github.event.inputs.service }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | dev |" >> $GITHUB_STEP_SUMMARY
+          echo "| Rolled back to | ${{ github.event.inputs.image_tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ArgoCD will reconcile within the next sync interval (~3 minutes)." >> $GITHUB_STEP_SUMMARY
+
+  rollback-prod:
+    if: github.event.inputs.environment == 'prod'
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Roll back ${{ github.event.inputs.service }} in prod
+        env:
+          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+          SERVICE: ${{ github.event.inputs.service }}
+        run: |
+          git clone https://x-access-token:${{ secrets.GITOPS_PAT }}@github.com/Savitxr/fanvault-gitops.git
+          cd fanvault-gitops
+
+          wget -q https://github.com/mikefarah/yq/releases/download/v4.44.2/yq_linux_amd64 \
+            -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+
+          VALUES_FILE="environments/prod/values-${SERVICE}.yaml"
+          yq e '.image.tag = env(IMAGE_TAG)' -i "${VALUES_FILE}"
+
+          git config user.email "ci@fanvault.internal"
+          git config user.name "FanVault CI"
+          git add "${VALUES_FILE}"
+          git diff --staged --quiet || git commit -m "ci: rollback ${SERVICE} to ${IMAGE_TAG} in prod [skip ci]"
+          git push
+
+      - name: Rollback summary
+        run: |
+          echo "### Rollback Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | ${{ github.event.inputs.service }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | prod |" >> $GITHUB_STEP_SUMMARY
+          echo "| Rolled back to | ${{ github.event.inputs.image_tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ArgoCD will reconcile within the next sync interval (~3 minutes)." >> $GITHUB_STEP_SUMMARY
