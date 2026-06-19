@@ -28,11 +28,19 @@ router.post('/login', async (req, res) => {
         AuthParameters: { USERNAME: email, PASSWORD: password },
       })
     );
+    const idPayload = JSON.parse(
+      Buffer.from(AuthenticationResult.IdToken.split('.')[1], 'base64').toString()
+    );
     res.json({
       accessToken:  AuthenticationResult.AccessToken,
       idToken:      AuthenticationResult.IdToken,
       refreshToken: AuthenticationResult.RefreshToken,
       expiresIn:    AuthenticationResult.ExpiresIn,
+      user: {
+        id:     idPayload.sub,
+        email:  idPayload.email,
+        groups: idPayload['cognito:groups'] || [],
+      },
     });
   } catch (err) {
     const status = err.name === 'NotAuthorizedException' ? 401 : 400;
