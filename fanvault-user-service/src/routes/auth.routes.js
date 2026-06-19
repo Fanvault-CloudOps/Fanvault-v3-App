@@ -40,6 +40,7 @@ router.post('/login', async (req, res) => {
         id:     idPayload.sub,
         email:  idPayload.email,
         groups: idPayload['cognito:groups'] || [],
+        role:   (idPayload['cognito:groups'] || []).includes('admins') ? 'admin' : 'user',
       },
     });
   } catch (err) {
