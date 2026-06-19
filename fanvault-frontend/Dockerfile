@@ -34,17 +34,17 @@ COPY nginx.conf /etc/nginx/nginx.conf
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 
 # Pin UID/GID to 101 to match Helm runAsUser: 101; set up writable dirs for non-root nginx
-RUN addgroup -S -g 101 appgroup && adduser -S -u 101 -G appgroup appuser && \
-    chown -R appuser:appgroup /usr/share/nginx/html && \
+RUN chown -R nginx:nginx /usr/share/nginx/html && \
     mkdir -p /var/cache/nginx/client_temp \
              /var/cache/nginx/proxy_temp \
              /var/cache/nginx/fastcgi_temp \
              /var/cache/nginx/uwsgi_temp \
              /var/cache/nginx/scgi_temp && \
-    chown -R appuser:appgroup /var/cache/nginx \
-                             /var/log/nginx \
-                             /etc/nginx/conf.d \
-                             /etc/nginx/templates
+    chown -R nginx:nginx \
+             /var/cache/nginx \
+             /var/log/nginx \
+             /etc/nginx/conf.d \
+             /etc/nginx/templates
 
 # Default environment variables for template rendering
 ENV USER_SERVICE_HOST=user-service
@@ -53,10 +53,10 @@ ENV COMMERCE_SERVICE_HOST=commerce-service
 ENV COMMERCE_SERVICE_PORT=3002
 
 # Run as non-root user
-USER appuser
+USER nginx
 
 # Expose HTTP port
-EXPOSE 80
+EXPOSE 8080
 
 # Healthcheck configuration using built-in wget spidering
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
