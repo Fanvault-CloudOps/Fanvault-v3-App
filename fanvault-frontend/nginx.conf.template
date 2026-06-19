@@ -9,7 +9,7 @@ upstream fanvault_commerce {
 }
 
 server {
-    listen 80;
+    listen 8080;
     server_name _;
 
     root  /usr/share/nginx/html;
