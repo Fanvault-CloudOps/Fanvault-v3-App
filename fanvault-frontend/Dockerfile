@@ -27,11 +27,14 @@ RUN rm /etc/nginx/conf.d/default.conf
 # Copy build output to Nginx HTML root directory
 COPY --from=builder /app/dist /usr/share/nginx/html
 
+# Copy main nginx config (overrides base image default to set pid /tmp/nginx.pid)
+COPY nginx.conf /etc/nginx/nginx.conf
+
 # Copy configuration template for environment variable interpolation on startup
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 
-# Create standard non-root user and group, adjust file ownership and setup folders
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup && \
+# Pin UID/GID to 101 to match Helm runAsUser: 101; set up writable dirs for non-root nginx
+RUN addgroup -S -g 101 appgroup && adduser -S -u 101 -G appgroup appuser && \
     chown -R appuser:appgroup /usr/share/nginx/html && \
     mkdir -p /var/cache/nginx/client_temp \
              /var/cache/nginx/proxy_temp \
@@ -41,9 +44,7 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup && \
     chown -R appuser:appgroup /var/cache/nginx \
                              /var/log/nginx \
                              /etc/nginx/conf.d \
-                             /etc/nginx/templates && \
-    touch /var/run/nginx.pid && \
-    chown appuser:appgroup /var/run/nginx.pid
+                             /etc/nginx/templates
 
 # Default environment variables for template rendering
 ENV USER_SERVICE_HOST=user-service
