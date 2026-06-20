@@ -424,15 +424,33 @@ jobs:
           NEW_REPO="${{ steps.resolve.outputs.new-repo }}"
           VALUES_FILE="gitops-repo/${{ steps.resolve.outputs.values-file }}"
 
-          echo "Values file : ${VALUES_FILE}"
-          echo "New repo    : ${NEW_REPO}"
-          echo "New tag     : ${NEW_TAG}"
+          echo "=== GitOps image updater ==="
+          echo "Values file      : ${VALUES_FILE}"
+          echo "image.repository : ${NEW_REPO}"
+          echo "image.tag        : ${NEW_TAG}"
+
+          if [[ -z "${NEW_REPO}" ]]; then
+            echo "::error::ECR_REPO_URI is empty — refusing to write a blank image.repository. Ensure AWS_ACCOUNT_ID secret is set and the docker-push job completed successfully."
+            exit 1
+          fi
+          if [[ -z "${NEW_TAG}" ]]; then
+            echo "::error::IMAGE_TAG is empty — refusing to write a blank image.tag."
+            exit 1
+          fi
 
           yq e ".image.repository = \"${NEW_REPO}\"" -i "${VALUES_FILE}"
           yq e ".image.tag = \"${NEW_TAG}\""         -i "${VALUES_FILE}"
 
-          echo "--- Updated image block ---"
-          grep -A3 "image:" "${VALUES_FILE}"
+          WRITTEN_REPO=$(yq e '.image.repository' "${VALUES_FILE}")
+          WRITTEN_TAG=$(yq e '.image.tag' "${VALUES_FILE}")
+          echo "--- Verified image block ---"
+          echo "image.repository : ${WRITTEN_REPO}"
+          echo "image.tag        : ${WRITTEN_TAG}"
+
+          if [[ -z "${WRITTEN_REPO}" || "${WRITTEN_REPO}" == "null" ]]; then
+            echo "::error::image.repository is empty in ${VALUES_FILE} after update — refusing to commit an invalid image reference."
+            exit 1
+          fi
 
       - name: Commit and push
         run: |
@@ -443,7 +461,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit (tag already up-to-date)"
           else
-            git commit -m "chore(${{ env.SERVICE }}): bump image.tag to ${{ steps.resolve.outputs.new-tag }} [skip ci]"
+            git commit -m "chore(${{ env.SERVICE }}): bump image to ${{ steps.resolve.outputs.new-repo }}:${{ steps.resolve.outputs.new-tag }} [skip ci]"
             git push origin main
           fi
 
