@@ -15,7 +15,7 @@ set -euo pipefail
 
 # ── 1. Configuration Variables ────────────────────────────────────────────────
 # Repository Details
-REPO_URL="https://github.com/Savitxr/Fanvault-Mono.git"
+REPO_URL="https://github.com/Fanvault-CloudOps/Fanvault-v3-App.git"
 BRANCH="monolithic"
 
 # Database Connection Details (Point to the DB EC2 instance)
