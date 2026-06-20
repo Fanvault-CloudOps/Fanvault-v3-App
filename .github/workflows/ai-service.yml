@@ -397,7 +397,7 @@ jobs:
       - name: Clone GitOps repo
         uses: actions/checkout@v4
         with:
-          repository: Savitxr/fanvault-gitops
+          repository: Fanvault-CloudOps/Fanvault-GitOps
           token: ${{ secrets.GITOPS_PAT }}
           ref: main
           path: gitops-repo

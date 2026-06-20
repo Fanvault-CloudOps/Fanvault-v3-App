@@ -38,7 +38,7 @@ jobs:
           IMAGE_TAG: ${{ github.event.inputs.image_tag }}
           SERVICE: ${{ github.event.inputs.service }}
         run: |
-          git clone https://x-access-token:${{ secrets.GITOPS_PAT }}@github.com/Savitxr/fanvault-gitops.git
+          git clone https://x-access-token:${{ secrets.GITOPS_PAT }}@github.com/Fanvault-CloudOps/Fanvault-GitOps.git
           cd fanvault-gitops
 
           wget -q https://github.com/mikefarah/yq/releases/download/v4.44.2/yq_linux_amd64 \
@@ -74,7 +74,7 @@ jobs:
           IMAGE_TAG: ${{ github.event.inputs.image_tag }}
           SERVICE: ${{ github.event.inputs.service }}
         run: |
-          git clone https://x-access-token:${{ secrets.GITOPS_PAT }}@github.com/Savitxr/fanvault-gitops.git
+          git clone https://x-access-token:${{ secrets.GITOPS_PAT }}@github.com/Fanvault-CloudOps/Fanvault-GitOps.git
           cd fanvault-gitops
 
           wget -q https://github.com/mikefarah/yq/releases/download/v4.44.2/yq_linux_amd64 \
