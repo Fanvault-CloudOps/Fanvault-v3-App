@@ -58,7 +58,7 @@ if ! id "fanvault" &>/dev/null; then
 fi
 
 echo "[INFO] Preparing /var/www directory structure..."
-mkdir -p /var/www/fanvault-user-auth-service
+mkdir -p /var/www/fanvault-user-service
 mkdir -p /var/www/fanvault-commerce-service
 mkdir -p /var/www/fanvault-frontend
 
@@ -68,20 +68,17 @@ TEMP_BUILD_DIR="/tmp/fanvault-build"
 rm -rf "$TEMP_BUILD_DIR"
 git clone -b "$BRANCH" "$REPO_URL" "$TEMP_BUILD_DIR"
 
-# ── 5. Setup Identity Service (Auth + User Profiles) ─────────────────────────
-echo "[INFO] Deploying Identity Service..."
+# ── 5. Setup User Service (Profiles + Addresses) ─────────────────────────────
+echo "[INFO] Deploying User Service..."
 rsync -av --delete --exclude='.git' --exclude='node_modules' --exclude='deploy' \
-  "$TEMP_BUILD_DIR/fanvault-user-auth-service/" "/var/www/fanvault-user-auth-service/"
+  "$TEMP_BUILD_DIR/fanvault-user-service/" "/var/www/fanvault-user-service/"
 
 # Create Environment file
-cat > /var/www/fanvault-user-auth-service/.env <<EOF
+cat > /var/www/fanvault-user-service/.env <<EOF
 PORT=3001
 NODE_ENV=production
-MONGO_URI=mongodb://${DB_APP_USER}:${DB_APP_PASSWORD}@${DB_HOST}:27017/${DB_NAME}?authSource=${DB_NAME}
+DYNAMODB_TABLE_PROFILES=fanvault-profiles
 JWT_SECRET=${JWT_SECRET}
-JWT_EXPIRES_IN=15m
-JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
-JWT_REFRESH_EXPIRES_IN=7d
 CORS_ORIGIN=*
 USE_SECRETS_MANAGER=${USE_SECRETS_MANAGER}
 AWS_REGION=${AWS_REGION}
@@ -89,15 +86,15 @@ SECRET_ID=${SECRET_ID}
 EOF
 
 # Install dependencies
-cd /var/www/fanvault-user-auth-service
+cd /var/www/fanvault-user-service
 npm install --omit=dev
-chown -R fanvault:fanvault /var/www/fanvault-user-auth-service
+chown -R fanvault:fanvault /var/www/fanvault-user-service
 
 # Create and enable systemd service
-echo "[INFO] Setting up fanvault-auth systemd service..."
-cat > /etc/systemd/system/fanvault-auth.service <<EOF
+echo "[INFO] Setting up fanvault-user systemd service..."
+cat > /etc/systemd/system/fanvault-user.service <<EOF
 [Unit]
-Description=FanVault Identity Service (Auth + User Profiles)
+Description=FanVault User Service (Profiles & Addresses)
 After=network-online.target
 Wants=network-online.target
 
@@ -105,18 +102,18 @@ Wants=network-online.target
 Type=simple
 User=fanvault
 Group=fanvault
-WorkingDirectory=/var/www/fanvault-user-auth-service
-EnvironmentFile=/var/www/fanvault-user-auth-service/.env
+WorkingDirectory=/var/www/fanvault-user-service
+EnvironmentFile=/var/www/fanvault-user-service/.env
 ExecStart=/usr/bin/node src/index.js
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=fanvault-auth
+SyslogIdentifier=fanvault-user
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/www/fanvault-user-auth-service
+ReadWritePaths=/var/www/fanvault-user-service
 
 [Install]
 WantedBy=multi-user.target
@@ -131,7 +128,10 @@ rsync -av --delete --exclude='.git' --exclude='node_modules' --exclude='deploy' 
 cat > /var/www/fanvault-commerce-service/.env <<EOF
 PORT=3002
 NODE_ENV=production
-MONGO_URI=mongodb://${DB_APP_USER}:${DB_APP_PASSWORD}@${DB_HOST}:27017/${DB_NAME}?authSource=${DB_NAME}
+DYNAMODB_TABLE_PRODUCTS=fanvault-products
+DYNAMODB_TABLE_ORDERS=fanvault-orders
+DYNAMODB_TABLE_METADATA=fanvault-metadata
+DYNAMODB_TABLE_AUDIT_LOGS=fanvault-audit-logs
 JWT_SECRET=${JWT_SECRET}
 CORS_ORIGIN=*
 USE_SECRETS_MANAGER=${USE_SECRETS_MANAGER}
@@ -176,8 +176,8 @@ EOF
 # ── 7. Enable and Start Backend Services ──────────────────────────────────────
 echo "[INFO] Starting systemd services..."
 systemctl daemon-reload
-systemctl enable fanvault-auth fanvault-commerce
-systemctl start fanvault-auth fanvault-commerce
+systemctl enable fanvault-user fanvault-commerce
+systemctl start fanvault-user fanvault-commerce
 
 # ── 8. Build & Deploy Frontend (Nginx + React Static) ──────────────────────────
 echo "[INFO] Building frontend React SPA..."
@@ -210,53 +210,17 @@ ln -sf /etc/nginx/sites-available/fanvault /etc/nginx/sites-enabled/fanvault
 systemctl enable nginx
 systemctl restart nginx
 
-# ── 9. Seed Consolidated Database ─────────────────────────────────────────────
-echo "[INFO] Waiting for database to be reachable..."
-
-RESOLVED_DB_HOST="$DB_HOST"
-if [ "$USE_SECRETS_MANAGER" = "true" ]; then
-  echo "[INFO] USE_SECRETS_MANAGER is true. Resolving database host from Secrets Manager..."
-  # Install SDK temporarily to resolve the host
-  mkdir -p /tmp/resolve-db
-  cd /tmp/resolve-db
-  npm install @aws-sdk/client-secrets-manager > /dev/null 2>&1
-  
-  RESOLVED_DB_HOST=$(node -e "
-    const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
-    const client = new SecretsManagerClient({ region: '${AWS_REGION}' });
-    client.send(new GetSecretValueCommand({ SecretId: '${SECRET_ID}' }))
-      .then(res => {
-        const secret = JSON.parse(res.SecretString);
-        console.log(secret.host);
-        process.exit(0);
-      })
-      .catch(err => {
-        console.error(err);
-        process.exit(1);
-      });
-  " 2>/dev/null || echo "$DB_HOST")
-fi
-
-echo "[INFO] Target database host resolved to: $RESOLVED_DB_HOST"
-
-until nc -z -w5 "$RESOLVED_DB_HOST" 27017; do
-  echo "Waiting for database port 27017 on $RESOLVED_DB_HOST to open..."
-  sleep 3
-done
-
-echo "[INFO] Database port is open. Seeding database..."
+# ── 9. Seed DynamoDB Database ────────────────────────────────────────────────
+echo "[INFO] Bootstrapping and seeding DynamoDB..."
 cd "$TEMP_BUILD_DIR/shared-resources/database"
-npm install mongoose bcryptjs dotenv @aws-sdk/client-secrets-manager
-export MONGO_URI="mongodb://${DB_APP_USER}:${DB_APP_PASSWORD}@${DB_HOST}:27017/${DB_NAME}?authSource=${DB_NAME}"
-export USE_SECRETS_MANAGER="${USE_SECRETS_MANAGER}"
+npm install @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb bcryptjs uuid dotenv
 export AWS_REGION="${AWS_REGION}"
-export SECRET_ID="${SECRET_ID}"
-node seed-data.js
+node bootstrap-dynamodb.js
 
 # ── 10. Verification ─────────────────────────────────────────────────────────
 echo "[INFO] Verifying local services..."
 sleep 3
-systemctl status fanvault-auth --no-pager
+systemctl status fanvault-user --no-pager
 systemctl status fanvault-commerce --no-pager
 nginx -t
 

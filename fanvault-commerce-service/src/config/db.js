@@ -40,7 +40,8 @@ async function initDynamoDB() {
         new GetSecretValueCommand({ SecretId: secretId })
       );
       const secret = JSON.parse(response.SecretString);
-      if (secret.jwtSecret) process.env.JWT_SECRET = secret.jwtSecret;
+      if (secret.jwtSecret)      process.env.JWT_SECRET      = secret.jwtSecret;
+      if (secret.openai_api_key) process.env.OPENAI_API_KEY = secret.openai_api_key;
       console.log('[db] JWT secret loaded from Secrets Manager.');
     } catch (err) {
       console.warn('[db] Could not fetch from Secrets Manager, using .env values:', err.message);

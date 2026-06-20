@@ -21,8 +21,19 @@ export function AuthProvider({ children }) {
     const token = localStorage.getItem('accessToken');
     const storedUser = localStorage.getItem('user');
     if (token && storedUser) {
-      setUser(JSON.parse(storedUser));
-      loadProfile();
+      try {
+        const parsed = JSON.parse(storedUser);
+        if (parsed && typeof parsed === 'object') {
+          setUser(parsed);
+          loadProfile();
+        } else {
+          console.warn('[AuthContext] Stored user is not an object, clearing auth state:', storedUser);
+          localStorage.clear();
+        }
+      } catch (err) {
+        console.warn('[AuthContext] Failed to parse stored user from localStorage:', { key: 'user', value: storedUser, error: err.message });
+        localStorage.clear();
+      }
     }
     setLoading(false);
   }, [loadProfile]);
@@ -45,16 +56,8 @@ export function AuthProvider({ children }) {
 
   const register = async (email, password) => {
     const { data } = await authAPI.register({ email, password });
-    localStorage.setItem('accessToken', data.accessToken);
-    localStorage.setItem('refreshToken', data.refreshToken);
-    localStorage.setItem('user', JSON.stringify(data.user));
-    setUser(data.user);
-    try {
-      await userAPI.createProfile({ email });
-    } catch {
-      // might already exist
-    }
-    await loadProfile();
+    // Cognito requires email verification before tokens are issued — no tokens in the
+    // register response. Do not write to localStorage here; caller redirects to login.
     return data;
   };
 

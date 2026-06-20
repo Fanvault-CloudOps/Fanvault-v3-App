@@ -1,0 +1,103 @@
+upstream fanvault_user {
+    server ${USER_SERVICE_HOST}:${USER_SERVICE_PORT};
+    keepalive 16;
+}
+
+upstream fanvault_commerce {
+    server ${COMMERCE_SERVICE_HOST}:${COMMERCE_SERVICE_PORT};
+    keepalive 16;
+}
+
+server {
+    listen 8080;
+    server_name _;
+
+    root  /usr/share/nginx/html;
+    index index.html;
+
+    # Gzip Compression
+    gzip            on;
+    gzip_vary       on;
+    gzip_proxied    any;
+    gzip_comp_level 6;
+    gzip_types
+        text/plain text/css text/xml
+        application/json application/javascript
+        application/xml+rss application/atom+xml
+        image/svg+xml;
+
+    # Security Headers
+    add_header X-Frame-Options         "SAMEORIGIN"                      always;
+    add_header X-Content-Type-Options  "nosniff"                         always;
+    add_header X-XSS-Protection        "1; mode=block"                   always;
+    add_header Referrer-Policy         "strict-origin-when-cross-origin" always;
+
+    # Cache Static Assets
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # API Routes
+    location ^~ /api/auth {
+        proxy_pass         http://fanvault_user;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection      "";
+        proxy_set_header   Host            $host;
+        proxy_set_header   X-Real-IP       $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 30s;
+    }
+
+    location ^~ /api/users {
+        proxy_pass         http://fanvault_user;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection      "";
+        proxy_set_header   Host            $host;
+        proxy_set_header   X-Real-IP       $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 30s;
+    }
+
+    location ^~ /api/products {
+        proxy_pass         http://fanvault_commerce;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection      "";
+        proxy_set_header   Host            $host;
+        proxy_set_header   X-Real-IP       $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 30s;
+    }
+
+    location ^~ /api/orders {
+        proxy_pass         http://fanvault_commerce;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection      "";
+        proxy_set_header   Host            $host;
+        proxy_set_header   X-Real-IP       $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 30s;
+    }
+
+    location ^~ /api/admin {
+        proxy_pass         http://fanvault_commerce;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection      "";
+        proxy_set_header   Host            $host;
+        proxy_set_header   X-Real-IP       $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 30s;
+    }
+
+    # Health check endpoint
+    location /health {
+        access_log off;
+        return 200 '{"status":"ok","service":"fanvault-frontend"}';
+        add_header Content-Type application/json;
+    }
+
+    # React SPA catch-all (must be last)
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

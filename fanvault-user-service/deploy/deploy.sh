@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy.sh — Identity Service (fanvault-user-auth-service)
+# deploy.sh — User Service (fanvault-user-service)
 # Run as root or sudo on the target EC2 backend instance.
 # =============================================================================
 set -euo pipefail
 
-SERVICE_NAME="fanvault-auth"
-APP_DIR="/var/www/fanvault-user-auth-service"
-SERVICE_FILE="./deploy/fanvault-auth.service"
+SERVICE_NAME="fanvault-user"
+APP_DIR="/var/www/fanvault-user-service"
+SERVICE_FILE="./deploy/fanvault-user.service"
 SYSTEMD_DIR="/etc/systemd/system"
 NODE_VERSION="18"
 
 echo "=============================================="
-echo " FanVault Identity Service — Deployment Script"
+echo "  FanVault User Service — Deployment Script"
 echo "=============================================="
 
 # ── 1. Ensure Node.js is installed ───────────────────────────────────────────
@@ -71,5 +71,5 @@ else
 fi
 
 echo "=============================================="
-echo " Deployment complete."
+echo "  Deployment complete."
 echo "=============================================="

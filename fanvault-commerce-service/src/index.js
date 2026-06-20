@@ -20,14 +20,50 @@ app.use(morgan('combined'));
 app.use(express.json({ limit: '10kb' }));
 
 // ── Health Check ──────────────────────────────────────────────────────────────
-app.get('/health', (req, res) =>
-  res.json({
-    status:    'ok',
-    service:   'fanvault-commerce-service',
-    database:  'dynamodb',
-    timestamp: new Date().toISOString(),
-  })
-);
+const http = require('http');
+
+app.get('/health', (req, res) => {
+  const aiServiceUrl = process.env.AI_SERVICE_URL || 'http://ai-service:8000';
+  const aiHealthUrl  = `${aiServiceUrl}/health`;
+
+  let responded = false;
+  const probe = http.get(aiHealthUrl, { timeout: 2000 }, (r) => {
+    if (!responded) {
+      responded = true;
+      res.json({
+        status:    'ok',
+        service:   'fanvault-commerce-service',
+        database:  'dynamodb',
+        aiStatus:  r.statusCode === 200 ? 'ok' : 'degraded',
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }).on('error', () => {
+    if (!responded) {
+      responded = true;
+      res.json({
+        status:    'ok',
+        service:   'fanvault-commerce-service',
+        database:  'dynamodb',
+        aiStatus:  'degraded',
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
+  probe.setTimeout(2000, () => {
+    probe.destroy();
+    if (!responded) {
+      responded = true;
+      res.json({
+        status:    'ok',
+        service:   'fanvault-commerce-service',
+        database:  'dynamodb',
+        aiStatus:  'degraded',
+        timestamp: new Date().toISOString(),
+      });
+    }
+  });
+});
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/api/products', productRoutes);
