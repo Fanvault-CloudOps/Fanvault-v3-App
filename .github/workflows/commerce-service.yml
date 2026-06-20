@@ -1,0 +1,475 @@
+name: CI/CD — commerce-service
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ['v*.*.*']
+    paths:
+      - 'fanvault-commerce-service/**'
+      - 'shared-resources/**'
+      - '.github/workflows/commerce-service.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'fanvault-commerce-service/**'
+      - 'shared-resources/**'
+      - '.github/workflows/commerce-service.yml'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  packages: write
+  security-events: write
+
+env:
+  AWS_REGION: us-east-1
+  SERVICE: commerce-service
+  SERVICE_DIR: fanvault-commerce-service
+  ECR_DEV:  ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/fanvault-dev-commerce-service
+  ECR_PROD: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/fanvault-prod-commerce-service
+  GITOPS_VALUES_DEV:  environments/dev/values-commerce.yaml
+  GITOPS_VALUES_PROD: environments/prod/values-commerce.yaml
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════
+  # 1. SONARQUBE SCAN
+  # ════════════════════════════════════════════════════════════════════════
+  sonar:
+    name: SonarQube Scan
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          projectBaseDir: ${{ env.SERVICE_DIR }}
+          args: >
+            -Dsonar.projectKey=fanvault-commerce-service
+            -Dsonar.sources=src
+            -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/build/**
+
+      - name: Write SonarQube summary
+        if: always()
+        run: |
+          if [[ "${{ job.status }}" == "success" ]]; then STATUS="✅ PASS"; else STATUS="⚠️ WARN"; fi
+          {
+            echo "## 🔎 Static Analysis — ${{ env.SERVICE }}"
+            echo "| Tool | Status |"
+            echo "|------|--------|"
+            echo "| SonarQube | ${STATUS} |"
+          } >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 2. SNYK DEPENDENCY SCAN
+  # ════════════════════════════════════════════════════════════════════════
+  snyk:
+    name: Snyk Scan
+    needs: sonar
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+        working-directory: ${{ env.SERVICE_DIR }}
+
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+
+      - name: Snyk Test (write results to Job Summary)
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          echo "### 🔍 Snyk Scan — ${{ env.SERVICE }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          snyk test \
+            --file=${{ env.SERVICE_DIR }}/package.json \
+            --severity-threshold=high >> $GITHUB_STEP_SUMMARY 2>&1 || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 3. DOCKER BUILD
+  # ════════════════════════════════════════════════════════════════════════
+  docker-build:
+    name: Docker Build
+    needs: snyk
+    runs-on: ubuntu-22.04
+    outputs:
+      sha-tag:     ${{ steps.tags.outputs.sha-tag }}
+      publish-tag: ${{ steps.tags.outputs.publish-tag }}
+      semver-tag:  ${{ steps.semver.outputs.new_tag }}
+      is-main:     ${{ steps.tags.outputs.is-main }}
+      is-tag:      ${{ steps.tags.outputs.is-tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute image tags and branch flags
+        id: tags
+        run: |
+          SHORT=$(git rev-parse --short HEAD)
+          SHA_TAG="sha-${SHORT}"
+          echo "sha-tag=${SHA_TAG}" >> $GITHUB_OUTPUT
+
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "is-main=true"        >> $GITHUB_OUTPUT
+            echo "is-tag=false"        >> $GITHUB_OUTPUT
+            echo "publish-tag=pending" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "is-main=false"                   >> $GITHUB_OUTPUT
+            echo "is-tag=true"                     >> $GITHUB_OUTPUT
+            echo "publish-tag=${GITHUB_REF_NAME}"  >> $GITHUB_OUTPUT
+          else
+            echo "is-main=false"            >> $GITHUB_OUTPUT
+            echo "is-tag=false"             >> $GITHUB_OUTPUT
+            echo "publish-tag=dev-${SHORT}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compute next semantic version (dry-run, main only)
+        id: semver
+        if: steps.tags.outputs.is-main == 'true'
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ github.token }}
+          dry_run: true
+          default_bump: patch
+          tag_prefix: 'v'
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (save to tar, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.SERVICE_DIR }}
+          push: false
+          tags: ${{ env.ECR_DEV }}:${{ steps.tags.outputs.sha-tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=docker,dest=/tmp/image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-${{ steps.tags.outputs.sha-tag }}
+          path: /tmp/image.tar
+          retention-days: 1
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 4. TRIVY IMAGE SCAN
+  # ════════════════════════════════════════════════════════════════════════
+  trivy-scan:
+    name: Trivy Image Scan
+    needs: docker-build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ needs.docker-build.outputs.sha-tag }}
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load --input /tmp/image.tar
+
+      - name: Trivy scan — table output
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.ECR_DEV }}:${{ needs.docker-build.outputs.sha-tag }}'
+          format: table
+          output: trivy-results.txt
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Trivy scan — SARIF for Security tab
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: '${{ env.ECR_DEV }}:${{ needs.docker-build.outputs.sha-tag }}'
+          format: sarif
+          output: trivy.sarif
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-${{ env.SERVICE }}
+
+      - name: Write Trivy results to Job Summary
+        if: always()
+        run: |
+          echo "### 🛡️ Trivy Scan — ${{ env.SERVICE }}" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          cat trivy-results.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 5. DOCKER PUSH — DEV
+  # ════════════════════════════════════════════════════════════════════════
+  docker-push:
+    name: Push to ECR Dev
+    needs: [docker-build, trivy-scan]
+    if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    outputs:
+      pushed-tag:  ${{ steps.pushed.outputs.tag }}
+      pushed-repo: ${{ steps.pushed.outputs.repo }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ needs.docker-build.outputs.sha-tag }}
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load --input /tmp/image.tar
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push dev-SHA tag (develop / feature branches)
+        if: needs.docker-build.outputs.is-main != 'true'
+        run: |
+          DEV_TAG="${{ needs.docker-build.outputs.publish-tag }}"
+          docker tag  ${{ env.ECR_DEV }}:${{ needs.docker-build.outputs.sha-tag }} \
+                      ${{ env.ECR_DEV }}:${DEV_TAG}
+          docker push ${{ env.ECR_DEV }}:${DEV_TAG}
+
+      - name: Push semver + sha + latest (main branch)
+        id: push-main
+        if: needs.docker-build.outputs.is-main == 'true'
+        run: |
+          SEMVER="${{ needs.docker-build.outputs.semver-tag }}"
+          SHA_TAG="${{ needs.docker-build.outputs.sha-tag }}"
+          docker tag  ${{ env.ECR_DEV }}:${SHA_TAG} ${{ env.ECR_DEV }}:${SEMVER}
+          docker tag  ${{ env.ECR_DEV }}:${SHA_TAG} ${{ env.ECR_DEV }}:latest
+          docker push ${{ env.ECR_DEV }}:${SHA_TAG}
+          DIGEST=$(docker push ${{ env.ECR_DEV }}:${SEMVER} | grep "digest:" | awk '{print $3}')
+          docker push ${{ env.ECR_DEV }}:latest
+          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+
+      - name: Create Git release tag (main only)
+        if: needs.docker-build.outputs.is-main == 'true'
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ github.token }}
+          custom_tag: ${{ needs.docker-build.outputs.semver-tag }}
+          tag_prefix: ''
+
+      - name: Attest image provenance (main only)
+        if: needs.docker-build.outputs.is-main == 'true' && steps.push-main.outputs.digest != ''
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name:   ${{ env.ECR_DEV }}
+          subject-digest: ${{ steps.push-main.outputs.digest }}
+          push-to-registry: true
+
+      - name: Set pushed tag output
+        id: pushed
+        run: |
+          if [[ "${{ needs.docker-build.outputs.is-main }}" == "true" ]]; then
+            echo "tag=${{ needs.docker-build.outputs.semver-tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ needs.docker-build.outputs.publish-tag }}" >> $GITHUB_OUTPUT
+          fi
+          echo "repo=${{ env.ECR_DEV }}" >> $GITHUB_OUTPUT
+
+      - name: Write push summary
+        run: |
+          {
+            echo ""
+            echo "## 🐳 Docker Push — ${{ env.SERVICE }}"
+            echo "| Key | Value |"
+            echo "|-----|-------|"
+            echo "| ECR Repository | ${{ env.ECR_DEV }} |"
+            echo "| Pushed Tag | ${{ steps.pushed.outputs.tag }} |"
+          } >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 6. DOCKER PUSH — PROD
+  # ════════════════════════════════════════════════════════════════════════
+  docker-push-prod:
+    name: Push to ECR Prod (approval required)
+    needs: [docker-build, trivy-scan]
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: prod
+    runs-on: ubuntu-22.04
+    outputs:
+      pushed-tag:  ${{ steps.pushed.outputs.tag }}
+      pushed-repo: ${{ steps.pushed.outputs.repo }}
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ needs.docker-build.outputs.sha-tag }}
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load --input /tmp/image.tar
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Tag and push version to ECR prod
+        id: push-prod
+        run: |
+          VERSION_TAG="${{ needs.docker-build.outputs.publish-tag }}"
+          docker tag  ${{ env.ECR_DEV }}:${{ needs.docker-build.outputs.sha-tag }} \
+                      ${{ env.ECR_PROD }}:${VERSION_TAG}
+          DIGEST=$(docker push ${{ env.ECR_PROD }}:${VERSION_TAG} | grep "digest:" | awk '{print $3}')
+          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+
+      - name: Attest image provenance
+        if: steps.push-prod.outputs.digest != ''
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name:   ${{ env.ECR_PROD }}
+          subject-digest: ${{ steps.push-prod.outputs.digest }}
+          push-to-registry: true
+
+      - name: Set pushed tag output
+        id: pushed
+        run: |
+          echo "tag=${{ needs.docker-build.outputs.publish-tag }}" >> $GITHUB_OUTPUT
+          echo "repo=${{ env.ECR_PROD }}"                          >> $GITHUB_OUTPUT
+
+      - name: Write push summary
+        run: |
+          {
+            echo ""
+            echo "## 🐳 Docker Push (Prod) — ${{ env.SERVICE }}"
+            echo "| Key | Value |"
+            echo "|-----|-------|"
+            echo "| ECR Repository | ${{ env.ECR_PROD }} |"
+            echo "| Pushed Tag | ${{ steps.pushed.outputs.tag }} |"
+          } >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 7. HELM UPDATER
+  # ════════════════════════════════════════════════════════════════════════
+  helm-updater:
+    name: Update GitOps Helm Values
+    needs: [docker-build, docker-push, docker-push-prod]
+    if: |
+      always() &&
+      !cancelled() &&
+      github.event_name != 'pull_request' &&
+      (needs.docker-push.result == 'success' || needs.docker-push-prod.result == 'success')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Clone GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: Savitxr/fanvault-gitops
+          token: ${{ secrets.GITOPS_PAT }}
+          ref: main
+          path: gitops-repo
+
+      - name: Install yq
+        uses: mikefarah/yq@v4.44.1
+
+      - name: Resolve values file and new tag
+        id: resolve
+        run: |
+          if [[ "${{ needs.docker-build.outputs.is-tag }}" == "true" ]]; then
+            echo "values-file=${{ env.GITOPS_VALUES_PROD }}"                  >> $GITHUB_OUTPUT
+            echo "new-tag=${{ needs.docker-push-prod.outputs.pushed-tag }}"   >> $GITHUB_OUTPUT
+            echo "new-repo=${{ needs.docker-push-prod.outputs.pushed-repo }}" >> $GITHUB_OUTPUT
+          else
+            echo "values-file=${{ env.GITOPS_VALUES_DEV }}"               >> $GITHUB_OUTPUT
+            echo "new-tag=${{ needs.docker-push.outputs.pushed-tag }}"    >> $GITHUB_OUTPUT
+            echo "new-repo=${{ needs.docker-push.outputs.pushed-repo }}"  >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update image in values.yaml
+        run: |
+          NEW_TAG="${{ steps.resolve.outputs.new-tag }}"
+          NEW_REPO="${{ steps.resolve.outputs.new-repo }}"
+          VALUES_FILE="gitops-repo/${{ steps.resolve.outputs.values-file }}"
+
+          echo "Values file : ${VALUES_FILE}"
+          echo "New repo    : ${NEW_REPO}"
+          echo "New tag     : ${NEW_TAG}"
+
+          yq e ".image.repository = \"${NEW_REPO}\"" -i "${VALUES_FILE}"
+          yq e ".image.tag = \"${NEW_TAG}\""         -i "${VALUES_FILE}"
+
+          echo "--- Updated image block ---"
+          grep -A3 "image:" "${VALUES_FILE}"
+
+      - name: Commit and push
+        run: |
+          cd gitops-repo
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ steps.resolve.outputs.values-file }}"
+          if git diff --cached --quiet; then
+            echo "No changes to commit (tag already up-to-date)"
+          else
+            git commit -m "chore(${{ env.SERVICE }}): bump image.tag to ${{ steps.resolve.outputs.new-tag }} [skip ci]"
+            git push origin main
+          fi
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 8. EMAIL NOTIFICATION
+  # ════════════════════════════════════════════════════════════════════════
+  email-notify:
+    name: Failure Email Notification
+    needs: [sonar, snyk, docker-build, trivy-scan, docker-push, docker-push-prod, helm-updater]
+    if: failure()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Send failure email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          secure: false
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASS }}
+          subject: "❌ CI Failed — ${{ env.SERVICE }} @ ${{ github.ref_name }}"
+          to: ${{ secrets.SMTP_TO }}
+          from: "FanVault CI <${{ secrets.SMTP_USER }}>"
+          body: |
+            CI/CD pipeline failed for ${{ env.SERVICE }}.
+
+            Repository  : ${{ github.repository }}
+            Branch      : ${{ github.ref_name }}
+            Commit      : ${{ github.sha }}
+            Triggered by: ${{ github.actor }}
+
+            View the failed run:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
