@@ -21,7 +21,12 @@ export default function LoginPage() {
       toast.success('Welcome back!');
       navigate('/');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Invalid credentials');
+      if (err.response?.data?.code === 'UserNotConfirmedException') {
+        toast.error('Please confirm your email first');
+        navigate('/confirm-email', { state: { email } });
+      } else {
+        toast.error(err.response?.data?.error || 'Invalid credentials');
+      }
     } finally {
       setLoading(false);
     }

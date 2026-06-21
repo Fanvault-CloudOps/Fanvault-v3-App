@@ -29,8 +29,8 @@ export default function RegisterPage() {
     setLoading(true);
     try {
       await register(email, password, firstName.trim(), lastName.trim());
-      toast.success('Account created! Welcome to FanVault 🎉');
-      navigate('/');
+      toast.success('Check your email for a confirmation code');
+      navigate('/confirm-email', { state: { email } });
     } catch (err) {
       toast.error(err.response?.data?.error || 'Registration failed');
     } finally {
