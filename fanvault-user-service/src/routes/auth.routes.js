@@ -52,8 +52,8 @@ router.post('/login', async (req, res) => {
 // POST /api/auth/register
 router.post('/register', async (req, res) => {
   const { email, password, firstName, lastName } = req.body;
-  if (!email || !password)
-    return res.status(400).json({ error: 'email and password required' });
+  if (!email || !password || !firstName || !lastName)
+    return res.status(400).json({ error: 'email, password, firstName and lastName are required' });
   try {
     await cognitoClient.send(
       new SignUpCommand({
@@ -61,9 +61,9 @@ router.post('/register', async (req, res) => {
         Username: email,
         Password: password,
         UserAttributes: [
-          { Name: 'email', Value: email },
-          ...(firstName ? [{ Name: 'given_name',  Value: firstName }] : []),
-          ...(lastName  ? [{ Name: 'family_name', Value: lastName  }] : []),
+          { Name: 'email',        Value: email },
+          { Name: 'given_name',   Value: firstName },
+          { Name: 'family_name',  Value: lastName },
         ],
       })
     );

@@ -54,8 +54,8 @@ export function AuthProvider({ children }) {
     return data;
   };
 
-  const register = async (email, password) => {
-    const { data } = await authAPI.register({ email, password });
+  const register = async (email, password, firstName, lastName) => {
+    const { data } = await authAPI.register({ email, password, firstName, lastName });
     // Cognito requires email verification before tokens are issued — no tokens in the
     // register response. Do not write to localStorage here; caller redirects to login.
     return data;
