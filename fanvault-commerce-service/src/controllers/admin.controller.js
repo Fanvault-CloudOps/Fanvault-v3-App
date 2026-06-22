@@ -35,7 +35,16 @@ exports.getAuditLogs = async (req, res) => {
     });
   } catch (err) {
     console.error('[admin] getAuditLogs error:', err.message);
-    res.status(500).json({ error: 'Internal server error' });
+    if (err.name === 'ResourceNotFoundException') {
+      return res.status(503).json({
+        error: 'Audit log table not found',
+        detail: `DynamoDB table '${process.env.DYNAMODB_TABLE_AUDIT_LOGS || 'fanvault-audit-logs'}' does not exist. Check DYNAMODB_TABLE_AUDIT_LOGS env var.`,
+      });
+    }
+    if (err.name === 'ValidationException') {
+      return res.status(400).json({ error: 'Invalid query parameters', detail: err.message });
+    }
+    res.status(500).json({ error: 'Failed to retrieve audit logs' });
   }
 };
 
