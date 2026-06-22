@@ -6,8 +6,8 @@ WORKDIR /app
 # Copy package configurations
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci
+# Install dependencies (npm install resolves updated semver ranges in package.json)
+RUN npm install
 
 # Copy application source code
 COPY . .
