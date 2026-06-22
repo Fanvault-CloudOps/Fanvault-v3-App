@@ -91,7 +91,6 @@ jobs:
         # npm is pre-installed on ubuntu-22.04 runners
 
       - name: Snyk Test (write results to Job Summary)
-        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
@@ -100,15 +99,37 @@ jobs:
           snyk test \
             --file=${{ env.SERVICE_DIR }}/requirements.txt \
             --package-manager=pip \
-            --severity-threshold=high >> $GITHUB_STEP_SUMMARY 2>&1 || true
+            --severity-threshold=high >> $GITHUB_STEP_SUMMARY 2>&1
           echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 2b. UNIT TESTS
+  # ════════════════════════════════════════════════════════════════════════
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pytest tests/ -v
 
   # ════════════════════════════════════════════════════════════════════════
   # 3. DOCKER BUILD
   # ════════════════════════════════════════════════════════════════════════
   docker-build:
     name: Docker Build
-    needs: snyk
+    needs: [snyk, test]
     runs-on: ubuntu-22.04
     outputs:
       sha-tag:     ${{ steps.tags.outputs.sha-tag }}
@@ -194,7 +215,7 @@ jobs:
           image-ref: '${{ env.ECR_DEV }}:${{ needs.docker-build.outputs.sha-tag }}'
           format: table
           output: trivy-results.txt
-          exit-code: '0'
+          exit-code: '1'
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH,MEDIUM'
@@ -457,11 +478,36 @@ jobs:
           fi
 
   # ════════════════════════════════════════════════════════════════════════
-  # 8. EMAIL NOTIFICATION
+  # 8. SMOKE TEST — dev environment health check post-deploy
+  # ════════════════════════════════════════════════════════════════════════
+  smoke-test:
+    name: Smoke Test (Dev)
+    needs: helm-updater
+    if: |
+      always() &&
+      needs.helm-updater.result == 'success' &&
+      github.event_name != 'pull_request' &&
+      !startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Wait for ArgoCD sync
+        run: sleep 60
+
+      - name: Health check — dev gateway
+        run: |
+          echo "Checking http://dev.fanvault.garden/health ..."
+          curl --fail --retry 5 --retry-delay 15 --retry-connrefused \
+            -o /dev/null -w "%{http_code}" \
+            http://dev.fanvault.garden/health \
+            && echo "Smoke test PASSED" \
+            || echo "::warning::Health check did not return 200 — ArgoCD may still be syncing"
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 9. EMAIL NOTIFICATION
   # ════════════════════════════════════════════════════════════════════════
   email-notify:
     name: Failure Email Notification
-    needs: [sonar, snyk, docker-build, trivy-scan, docker-push, docker-push-prod, helm-updater]
+    needs: [sonar, snyk, test, docker-build, trivy-scan, docker-push, docker-push-prod, helm-updater, smoke-test]
     if: failure()
     runs-on: ubuntu-22.04
     steps:

@@ -88,7 +88,6 @@ jobs:
         run: npm install -g snyk
 
       - name: Snyk Test (write results to Job Summary)
-        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
@@ -96,8 +95,37 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           snyk test \
             --file=${{ env.SERVICE_DIR }}/package.json \
-            --severity-threshold=high >> $GITHUB_STEP_SUMMARY 2>&1 || true
+            --severity-threshold=high >> $GITHUB_STEP_SUMMARY 2>&1
           echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 2b. LINT & UNIT TESTS
+  # ════════════════════════════════════════════════════════════════════════
+  test:
+    name: Lint & Test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Lint
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          npx eslint src/ --ext .js --no-eslintrc \
+            --rule '{"no-undef": "warn", "no-unused-vars": "warn"}' \
+            --max-warnings 50 || echo "::warning::Lint warnings — review src/ for issues"
+
+      - name: Unit Tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm test
 
   # ════════════════════════════════════════════════════════════════════════
   # 3. DOCKER BUILD
@@ -107,7 +135,7 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════
   docker-build:
     name: Docker Build
-    needs: snyk
+    needs: [snyk, test]
     runs-on: ubuntu-22.04
     outputs:
       sha-tag:     ${{ steps.tags.outputs.sha-tag }}
@@ -171,7 +199,7 @@ jobs:
           retention-days: 1
 
   # ════════════════════════════════════════════════════════════════════════
-  # 4. TRIVY IMAGE SCAN  (non-blocking — exit-code 0)
+  # 4. TRIVY IMAGE SCAN  (blocking on CRITICAL/HIGH — exit-code 1)
   # ════════════════════════════════════════════════════════════════════════
   trivy-scan:
     name: Trivy Image Scan
@@ -193,7 +221,7 @@ jobs:
           image-ref: '${{ env.ECR_DEV }}:${{ needs.docker-build.outputs.sha-tag }}'
           format: table
           output: trivy-results.txt
-          exit-code: '0'
+          exit-code: '1'
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH,MEDIUM'
@@ -458,11 +486,36 @@ jobs:
           fi
 
   # ════════════════════════════════════════════════════════════════════════
-  # 8. EMAIL NOTIFICATION (runs only if any previous job fails)
+  # 8. SMOKE TEST — dev environment health check post-deploy
+  # ════════════════════════════════════════════════════════════════════════
+  smoke-test:
+    name: Smoke Test (Dev)
+    needs: helm-updater
+    if: |
+      always() &&
+      needs.helm-updater.result == 'success' &&
+      github.event_name != 'pull_request' &&
+      !startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Wait for ArgoCD sync
+        run: sleep 60
+
+      - name: Health check — dev gateway
+        run: |
+          echo "Checking http://dev.fanvault.garden/health ..."
+          curl --fail --retry 5 --retry-delay 15 --retry-connrefused \
+            -o /dev/null -w "%{http_code}" \
+            http://dev.fanvault.garden/health \
+            && echo "Smoke test PASSED" \
+            || echo "::warning::Health check did not return 200 — ArgoCD may still be syncing"
+
+  # ════════════════════════════════════════════════════════════════════════
+  # 9. EMAIL NOTIFICATION (runs only if any previous job fails)
   # ════════════════════════════════════════════════════════════════════════
   email-notify:
     name: Failure Email Notification
-    needs: [sonar, snyk, docker-build, trivy-scan, docker-push, docker-push-prod, helm-updater]
+    needs: [sonar, snyk, test, docker-build, trivy-scan, docker-push, docker-push-prod, helm-updater, smoke-test]
     if: failure()
     runs-on: ubuntu-22.04
     steps:
