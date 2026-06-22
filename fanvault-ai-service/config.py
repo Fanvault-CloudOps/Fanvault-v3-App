@@ -1,7 +1,7 @@
 import os
 
 AWS_REGION: str = os.getenv("AWS_REGION", "us-east-1")
-BEDROCK_MODEL_ID: str = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-5-haiku-20241022-v1:0")
+BEDROCK_MODEL_ID: str = os.getenv("BEDROCK_MODEL_ID", "us.amazon.nova-pro-v1:0")
 AI_TIMEOUT_S: float = float(os.getenv("AI_TIMEOUT_MS", "30000")) / 1000.0
 S3_PRODUCT_IMAGES_BUCKET: str = os.getenv("S3_PRODUCT_IMAGES_BUCKET", "")
 PORT: int = int(os.getenv("PORT", "8000"))
