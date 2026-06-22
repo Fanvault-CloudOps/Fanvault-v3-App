@@ -54,8 +54,8 @@ jobs:
           args: >
             -Dsonar.projectKey=fanvault-ai-service
             -Dsonar.sources=.
-            -Dsonar.exclusions=**/__pycache__/**,**/*.pyc,**/tests/**
-            -Dsonar.python.version=3.11
+            -Dsonar.exclusions=**/__pycache__/**,**/*.pyc,**/tests/**,**/docs/**
+            -Dsonar.python.version=3.12
 
       - name: Write SonarQube summary
         if: always()
@@ -79,7 +79,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: pip install -r requirements.txt
