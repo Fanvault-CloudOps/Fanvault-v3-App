@@ -16,7 +16,7 @@ services:
       - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
       - DYNAMODB_TABLE_PROFILES=${DYNAMODB_TABLE_PROFILES:-fanvault-profiles}
       - USE_SECRETS_MANAGER=false
-      - JWT_SECRET=${JWT_SECRET:-supersecretjwtsigningkeyhere123!}
+      - JWT_SECRET=${JWT_SECRET}
       - CORS_ORIGIN=http://localhost
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', (r) => { if (r.statusCode === 200) process.exit(0); else process.exit(1); }).on('error', () => process.exit(1));"]
@@ -44,7 +44,7 @@ services:
       - DYNAMODB_TABLE_ORDERS=${DYNAMODB_TABLE_ORDERS:-fanvault-orders}
       - DYNAMODB_TABLE_METADATA=${DYNAMODB_TABLE_METADATA:-fanvault-metadata}
       - USE_SECRETS_MANAGER=false
-      - JWT_SECRET=${JWT_SECRET:-supersecretjwtsigningkeyhere123!}
+      - JWT_SECRET=${JWT_SECRET}
       - CORS_ORIGIN=http://localhost
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://localhost:3002/health', (r) => { if (r.statusCode === 200) process.exit(0); else process.exit(1); }).on('error', () => process.exit(1));"]
