@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Upload, X, ArrowLeft, Loader } from 'lucide-react';
+import { Upload, X, ArrowLeft, Loader, Sparkles } from 'lucide-react';
 import { adminAPI } from '../../api/client';
 import toast from 'react-hot-toast';
 
@@ -18,10 +18,11 @@ export default function AdminProductForm() {
   const isEdit      = !!productId;
   const navigate    = useNavigate();
   const fileRef     = useRef();
-  const [form, setForm]         = useState(EMPTY);
+  const [form, setForm]           = useState(EMPTY);
   const [uploading, setUploading] = useState(false);
   const [saving,    setSaving]    = useState(false);
   const [loading,   setLoading]   = useState(isEdit);
+  const [generating, setGenerating] = useState(false);
 
   useEffect(() => {
     if (!isEdit) return;
@@ -86,6 +87,29 @@ export default function AdminProductForm() {
 
   const removeImage = (idx) => setForm(f => ({ ...f, images: f.images.filter((_, i) => i !== idx) }));
 
+  const handleGenerateMetadata = async () => {
+    const imageKey = form.images[0];
+    if (!imageKey) return;
+    setGenerating(true);
+    try {
+      const { data } = await adminAPI.generateMetadata({ imageKey });
+      if (!data.success) throw new Error(data.error || 'Generation failed');
+      const { title, description, tags } = data.data;
+      setForm(f => ({
+        ...f,
+        name:        title       || f.name,
+        description: description || f.description,
+        tags:        Array.isArray(tags) ? tags.join(', ') : f.tags,
+      }));
+      toast.success(`Metadata generated via ${data.provider} in ${data.latencyMs}ms`);
+    } catch (err) {
+      const msg = err.response?.data?.message || err.response?.data?.error || err.message || 'AI generation failed';
+      toast.error(msg);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   const splitArr = (str) => str.split(',').map(s => s.trim()).filter(Boolean);
 
   const handleSubmit = async (e) => {
@@ -137,6 +161,56 @@ export default function AdminProductForm() {
       </div>
 
       <form onSubmit={handleSubmit}>
+        <div className="admin-card" style={{ marginBottom: 20 }}>
+          <h3 style={{ marginBottom: 18, fontSize: '1rem' }}>Product Images</h3>
+          <div
+            className="image-upload-area"
+            onClick={() => !uploading && fileRef.current?.click()}
+          >
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              multiple
+              onChange={handleImageChange}
+            />
+            {uploading
+              ? <><Loader size={28} className="image-upload-icon" style={{ animation: 'spin 1s linear infinite' }} /><p>Uploading...</p></>
+              : <><Upload size={28} className="image-upload-icon" /><p>Click to upload images</p><small>JPEG, PNG, WebP, GIF — max 5 MB each</small></>
+            }
+          </div>
+
+          {form.images.length > 0 && (
+            <>
+              <div className="image-preview-grid">
+                {form.images.map((img, idx) => (
+                  <div key={idx} className="image-preview-item">
+                    <img src={img.startsWith('http') ? img : `/api/products/images/${img}`} alt={`img ${idx}`} />
+                    <button type="button" className="image-preview-remove" onClick={() => removeImage(idx)}>×</button>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 16 }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={handleGenerateMetadata}
+                  disabled={generating}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                >
+                  {generating
+                    ? <><Loader size={14} style={{ animation: 'spin 1s linear infinite' }} /> Generating...</>
+                    : <><Sparkles size={14} /> Generate metadata with AI</>
+                  }
+                </button>
+                <small style={{ marginLeft: 10, color: '#9ca3af' }}>
+                  Fills name, description, and tags from the first image
+                </small>
+              </div>
+            </>
+          )}
+        </div>
+
         <div className="admin-card" style={{ marginBottom: 20 }}>
           <h3 style={{ marginBottom: 18, fontSize: '1rem' }}>Basic Information</h3>
           <div className="admin-form-grid">
@@ -193,37 +267,6 @@ export default function AdminProductForm() {
               <input value={form.tags} onChange={e => set('tags', e.target.value)} placeholder="ipl, cricket, jersey (comma separated)" />
             </div>
           </div>
-        </div>
-
-        <div className="admin-card" style={{ marginBottom: 20 }}>
-          <h3 style={{ marginBottom: 18, fontSize: '1rem' }}>Product Images</h3>
-          <div
-            className="image-upload-area"
-            onClick={() => !uploading && fileRef.current?.click()}
-          >
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/jpeg,image/png,image/webp,image/gif"
-              multiple
-              onChange={handleImageChange}
-            />
-            {uploading
-              ? <><Loader size={28} className="image-upload-icon" style={{ animation: 'spin 1s linear infinite' }} /><p>Uploading...</p></>
-              : <><Upload size={28} className="image-upload-icon" /><p>Click to upload images</p><small>JPEG, PNG, WebP, GIF — max 5 MB each</small></>
-            }
-          </div>
-
-          {form.images.length > 0 && (
-            <div className="image-preview-grid">
-              {form.images.map((img, idx) => (
-                <div key={idx} className="image-preview-item">
-                  <img src={img.startsWith('http') ? img : `/api/products/images/${img}`} alt={`img ${idx}`} />
-                  <button type="button" className="image-preview-remove" onClick={() => removeImage(idx)}>×</button>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
 
         <div style={{ display: 'flex', gap: 12 }}>
