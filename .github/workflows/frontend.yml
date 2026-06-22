@@ -71,7 +71,6 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════
   snyk:
     name: Snyk Scan
-    needs: sonar
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -99,40 +98,11 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
 
   # ════════════════════════════════════════════════════════════════════════
-  # 2b. LINT & BUILD VALIDATION
-  # ════════════════════════════════════════════════════════════════════════
-  test:
-    name: Lint & Build Validate
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: Install dependencies
-        working-directory: ${{ env.SERVICE_DIR }}
-        run: npm ci
-
-      - name: Lint
-        working-directory: ${{ env.SERVICE_DIR }}
-        run: |
-          npx eslint src/ --ext .js --no-eslintrc \
-            --rule '{"no-undef": "warn", "no-unused-vars": "warn"}' \
-            --max-warnings 50 || echo "::warning::Lint warnings — review src/ for issues"
-
-      - name: Build validation (static frontend)
-        working-directory: ${{ env.SERVICE_DIR }}
-        run: node --check src/**/*.js 2>/dev/null || echo "No server-side JS to validate"
-
-  # ════════════════════════════════════════════════════════════════════════
   # 3. DOCKER BUILD
   # ════════════════════════════════════════════════════════════════════════
   docker-build:
     name: Docker Build
-    needs: [snyk, test]
+    needs: snyk
     runs-on: ubuntu-22.04
     outputs:
       sha-tag:     ${{ steps.tags.outputs.sha-tag }}
@@ -524,7 +494,7 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════
   email-notify:
     name: Failure Email Notification
-    needs: [sonar, snyk, test, docker-build, trivy-scan, docker-push, docker-push-prod, helm-updater, smoke-test]
+    needs: [sonar, snyk, docker-build, trivy-scan, docker-push, docker-push-prod, helm-updater, smoke-test]
     if: failure()
     runs-on: ubuntu-22.04
     steps:

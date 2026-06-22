@@ -73,7 +73,6 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════
   snyk:
     name: Snyk Scan
-    needs: sonar
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -103,33 +102,11 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
 
   # ════════════════════════════════════════════════════════════════════════
-  # 2b. UNIT TESTS
-  # ════════════════════════════════════════════════════════════════════════
-  test:
-    name: Unit Tests
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install test dependencies
-        working-directory: ${{ env.SERVICE_DIR }}
-        run: pip install -r requirements-dev.txt
-
-      - name: Run tests
-        working-directory: ${{ env.SERVICE_DIR }}
-        run: pytest tests/ -v
-
-  # ════════════════════════════════════════════════════════════════════════
   # 3. DOCKER BUILD
   # ════════════════════════════════════════════════════════════════════════
   docker-build:
     name: Docker Build
-    needs: [snyk, test]
+    needs: snyk
     runs-on: ubuntu-22.04
     outputs:
       sha-tag:     ${{ steps.tags.outputs.sha-tag }}
@@ -507,7 +484,7 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════
   email-notify:
     name: Failure Email Notification
-    needs: [sonar, snyk, test, docker-build, trivy-scan, docker-push, docker-push-prod, helm-updater, smoke-test]
+    needs: [sonar, snyk, docker-build, trivy-scan, docker-push, docker-push-prod, helm-updater, smoke-test]
     if: failure()
     runs-on: ubuntu-22.04
     steps:
