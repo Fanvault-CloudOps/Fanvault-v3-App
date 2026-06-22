@@ -16,6 +16,7 @@ import AdminAudit from './pages/admin/AdminAudit';
 import HomePage from './pages/HomePage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
+import ConfirmEmailPage from './pages/ConfirmEmailPage';
 import ProductsPage from './pages/ProductsPage';
 import ProductDetailPage from './pages/ProductDetailPage';
 import CartPage from './pages/CartPage';
@@ -64,7 +65,8 @@ function AppRoutes() {
             <Routes>
               <Route path="/"            element={<HomePage />} />
               <Route path="/login"       element={<GuestRoute><LoginPage /></GuestRoute>} />
-              <Route path="/register"    element={<GuestRoute><RegisterPage /></GuestRoute>} />
+              <Route path="/register"       element={<GuestRoute><RegisterPage /></GuestRoute>} />
+              <Route path="/confirm-email" element={<ConfirmEmailPage />} />
               <Route path="/products"    element={<ProductsPage />} />
               <Route path="/products/:productId" element={<ProductDetailPage />} />
               <Route path="/cart"        element={<CartPage />} />

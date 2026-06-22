@@ -31,6 +31,8 @@
 .auth-header p { color: var(--text-secondary); margin: 0; font-size: 15px; }
 
 .auth-form { display: flex; flex-direction: column; gap: 20px; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 480px) { .form-row { grid-template-columns: 1fr; gap: 20px; } }
 
 .input-with-icon { position: relative; }
 .input-with-icon .form-input { padding-right: 44px; }

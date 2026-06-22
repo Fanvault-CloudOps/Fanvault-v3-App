@@ -40,10 +40,12 @@ api.interceptors.response.use(
 
 // ── Auth ──────────────────────────────────────────
 export const authAPI = {
-  register: (data) => api.post('/api/auth/register', data),
-  login: (data) => api.post('/api/auth/login', data),
-  logout: () => api.post('/api/auth/logout'),
-  verify: () => api.get('/api/auth/verify'),
+  register:   (data) => api.post('/api/auth/register', data),
+  confirm:    (data) => api.post('/api/auth/confirm', data),
+  resendCode: (data) => api.post('/api/auth/resend-code', data),
+  login:      (data) => api.post('/api/auth/login', data),
+  logout:     ()     => api.post('/api/auth/logout'),
+  verify:     ()     => api.get('/api/auth/verify'),
 };
 
 // ── Users ─────────────────────────────────────────

@@ -3,6 +3,8 @@ const {
   CognitoIdentityProviderClient,
   InitiateAuthCommand,
   SignUpCommand,
+  ConfirmSignUpCommand,
+  ResendConfirmationCodeCommand,
   GlobalSignOutCommand,
 } = require('@aws-sdk/client-cognito-identity-provider');
 const jwt = require('jsonwebtoken');
@@ -44,16 +46,50 @@ router.post('/login', async (req, res) => {
       },
     });
   } catch (err) {
-    const status = err.name === 'NotAuthorizedException' ? 401 : 400;
+    if (err.name === 'NotAuthorizedException') {
+      return res.status(401).json({ error: err.message });
+    }
+    if (err.name === 'UserNotConfirmedException') {
+      return res.status(403).json({ error: 'User is not confirmed.', code: 'UserNotConfirmedException' });
+    }
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// POST /api/auth/confirm
+router.post('/confirm', async (req, res) => {
+  const { email, code } = req.body;
+  if (!email || !code) return res.status(400).json({ error: 'email and code required' });
+  try {
+    await cognitoClient.send(
+      new ConfirmSignUpCommand({ ClientId: CLIENT_ID, Username: email, ConfirmationCode: code })
+    );
+    res.json({ message: 'Email confirmed. You can now sign in.' });
+  } catch (err) {
+    const status = err.name === 'CodeMismatchException' || err.name === 'ExpiredCodeException' ? 400 : 400;
     res.status(status).json({ error: err.message });
+  }
+});
+
+// POST /api/auth/resend-code
+router.post('/resend-code', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  try {
+    await cognitoClient.send(
+      new ResendConfirmationCodeCommand({ ClientId: CLIENT_ID, Username: email })
+    );
+    res.json({ message: 'Confirmation code resent.' });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 
 // POST /api/auth/register
 router.post('/register', async (req, res) => {
   const { email, password, firstName, lastName } = req.body;
-  if (!email || !password)
-    return res.status(400).json({ error: 'email and password required' });
+  if (!email || !password || !firstName || !lastName)
+    return res.status(400).json({ error: 'email, password, firstName and lastName are required' });
   try {
     await cognitoClient.send(
       new SignUpCommand({
@@ -61,9 +97,9 @@ router.post('/register', async (req, res) => {
         Username: email,
         Password: password,
         UserAttributes: [
-          { Name: 'email', Value: email },
-          ...(firstName ? [{ Name: 'given_name',  Value: firstName }] : []),
-          ...(lastName  ? [{ Name: 'family_name', Value: lastName  }] : []),
+          { Name: 'email',        Value: email },
+          { Name: 'given_name',   Value: firstName },
+          { Name: 'family_name',  Value: lastName },
         ],
       })
     );

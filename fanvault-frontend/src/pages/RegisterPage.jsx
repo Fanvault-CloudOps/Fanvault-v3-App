@@ -8,6 +8,8 @@ import './AuthPage.css';
 export default function RegisterPage() {
   const { register } = useAuth();
   const navigate = useNavigate();
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -21,13 +23,14 @@ export default function RegisterPage() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (!firstName.trim() || !lastName.trim()) { toast.error('Please enter your full name'); return; }
     if (password !== confirm) { toast.error('Passwords do not match'); return; }
     if (password.length < 8) { toast.error('Password must be at least 8 characters'); return; }
     setLoading(true);
     try {
-      await register(email, password);
-      toast.success('Account created! Welcome to FanVault 🎉');
-      navigate('/');
+      await register(email, password, firstName.trim(), lastName.trim());
+      toast.success('Check your email for a confirmation code');
+      navigate('/confirm-email', { state: { email } });
     } catch (err) {
       toast.error(err.response?.data?.error || 'Registration failed');
     } finally {
@@ -48,6 +51,35 @@ export default function RegisterPage() {
         </div>
 
         <form onSubmit={handleSubmit} className="auth-form">
+          <div className="form-row">
+            <div className="form-group">
+              <label className="form-label" htmlFor="reg-first">First name</label>
+              <input
+                id="reg-first"
+                type="text"
+                className="form-input"
+                placeholder="Jane"
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                required
+                autoFocus
+                autoComplete="given-name"
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label" htmlFor="reg-last">Last name</label>
+              <input
+                id="reg-last"
+                type="text"
+                className="form-input"
+                placeholder="Smith"
+                value={lastName}
+                onChange={(e) => setLastName(e.target.value)}
+                required
+                autoComplete="family-name"
+              />
+            </div>
+          </div>
           <div className="form-group">
             <label className="form-label" htmlFor="reg-email">Email address</label>
             <input
@@ -58,7 +90,7 @@ export default function RegisterPage() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              autoFocus
+              autoComplete="email"
             />
           </div>
           <div className="form-group">
