@@ -95,6 +95,8 @@ export const adminAPI = {
   deleteProduct:     (productId)     => api.delete(`/api/products/${productId}`),
   getProducts:       (params) => api.get('/api/products', { params }),
   getProduct:        (productId)     => api.get(`/api/products/${productId}`),
+  // AI metadata generation
+  generateMetadata:  (data)   => api.post('/api/admin/generate-metadata', data),
   // Order management
   getAllOrders:       (params) => api.get('/api/orders', { params }),
   updateOrderStatus: (id, d)  => api.patch(`/api/orders/${id}/status`, d),
