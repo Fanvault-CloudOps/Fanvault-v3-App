@@ -1,5 +1,5 @@
 # ── Build/Dependencies Stage ──────────────────────────────────────────────────
-FROM node:18-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -9,19 +9,27 @@ RUN apk add --no-cache python3 make g++
 # Copy package configuration
 COPY package*.json ./
 
-# Install all dependencies (production + development for potential build steps)
-RUN npm install
+# Install production dependencies only (excludes devDeps with vulnerable transitive chains)
+RUN npm install --omit=dev
 
 # Copy source code
 COPY src/ ./src/
 
 # ── Runtime Stage ─────────────────────────────────────────────────────────────
-FROM node:18-alpine AS runner
+FROM node:22-alpine AS runner
 
 WORKDIR /app
 
-# Ensure security updates and add standard system group/user
+# Apply Alpine security patches and upgrade npm to get fixed bundled deps
+# (fixes libcrypto3/libssl3/musl/zlib via apk; fixes npm-bundled tar/glob/minimatch via npm upgrade)
+# Patch undici in npm's bundled modules (CVE-2026-12151) via temp-dir swap
 RUN apk update && apk upgrade --no-cache && \
+    npm install -g npm@latest && \
+    mkdir -p /tmp/undici-fix && cd /tmp/undici-fix && \
+    npm install undici@"^6.27.0" --no-save 2>/dev/null && \
+    rm -rf /usr/local/lib/node_modules/npm/node_modules/undici && \
+    cp -r /tmp/undici-fix/node_modules/undici /usr/local/lib/node_modules/npm/node_modules/ && \
+    rm -rf /tmp/undici-fix && cd / && \
     addgroup -S appgroup && adduser -S appuser -G appgroup
 
 # Set production environment
