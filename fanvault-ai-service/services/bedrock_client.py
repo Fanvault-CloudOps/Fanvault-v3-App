@@ -1,6 +1,8 @@
 import json
 import logging
+import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Generator
 
 import boto3
@@ -36,10 +38,43 @@ class BedrockThrottleError(BedrockClientError):
 
 class BedrockClient:
     def __init__(self) -> None:
-        self._client = boto3.client("bedrock-runtime", region_name=config.AWS_REGION)
         self._model_id = config.BEDROCK_MODEL_ID
+        self._creds_expiry: datetime | None = None
+        self._lock = threading.Lock()
+        self._refresh_client()
+
+    def _refresh_client(self) -> None:
+        if config.BEDROCK_ASSUME_ROLE_ARN:
+            sts = boto3.client("sts", region_name=config.AWS_REGION)
+            assumed = sts.assume_role(
+                RoleArn=config.BEDROCK_ASSUME_ROLE_ARN,
+                RoleSessionName="fanvault-ai-bedrock",
+                DurationSeconds=3600,
+            )
+            creds = assumed["Credentials"]
+            self._creds_expiry = creds["Expiration"]
+            self._client = boto3.client(
+                "bedrock-runtime",
+                region_name=config.AWS_REGION,
+                aws_access_key_id=creds["AccessKeyId"],
+                aws_secret_access_key=creds["SecretAccessKey"],
+                aws_session_token=creds["SessionToken"],
+            )
+        else:
+            self._client = boto3.client("bedrock-runtime", region_name=config.AWS_REGION)
+            self._creds_expiry = None
+
+    def _ensure_fresh_client(self) -> None:
+        if self._creds_expiry is None:
+            return
+        if datetime.now(timezone.utc) >= self._creds_expiry - timedelta(minutes=5):
+            with self._lock:
+                if datetime.now(timezone.utc) >= self._creds_expiry - timedelta(minutes=5):
+                    self._refresh_client()
 
     def generate(self, image_bytes: bytes, mime_type: str) -> dict:
+        self._ensure_fresh_client()
+
         ext = mime_type.split("/")[-1].lower() if "/" in mime_type else "jpeg"
         fmt = ext if ext in _VALID_IMAGE_FORMATS else "jpeg"
 
@@ -98,6 +133,8 @@ class BedrockClient:
         raise last_exc or BedrockClientError("generate failed after retries")
 
     def stream_generate(self, image_bytes: bytes, mime_type: str) -> Generator[str, None, None]:
+        self._ensure_fresh_client()
+
         ext = mime_type.split("/")[-1].lower() if "/" in mime_type else "jpeg"
         fmt = ext if ext in _VALID_IMAGE_FORMATS else "jpeg"
 
@@ -126,12 +163,15 @@ class BedrockClient:
         try:
             sts = boto3.client("sts", region_name=config.AWS_REGION)
             identity = sts.get_caller_identity()
-            return {
+            result = {
                 "status": "ok",
                 "model_id": self._model_id,
                 "region": config.AWS_REGION,
                 "iam_arn": identity.get("Arn"),
             }
+            if config.BEDROCK_ASSUME_ROLE_ARN:
+                result["assumed_role_arn"] = config.BEDROCK_ASSUME_ROLE_ARN
+            return result
         except NoCredentialsError:
             return {
                 "status": "degraded",
