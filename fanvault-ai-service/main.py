@@ -9,15 +9,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import config
-from services.bedrock_client import BedrockClient
+from providers.bedrock_provider import BedrockApiKeyProvider
 from validators.metadata_validator import validate_metadata
 from metrics.ai_metrics import emit_metrics
+
+config.validate_config()
 
 app = FastAPI(title="FanVault AI Service", docs_url=None, redoc_url=None)
 
 _IMAGE_KEY_RE = re.compile(r"^products/[a-zA-Z0-9\-_./]+$")
 
-_bedrock = BedrockClient()
+_provider = BedrockApiKeyProvider()
 
 
 async def _fetch_image(image_key: str) -> tuple[bytes, str]:
@@ -42,8 +44,7 @@ def health():
 
 @app.get("/health/bedrock")
 async def health_bedrock():
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _bedrock.health_check)
+    result = await _provider.health_check()
     status_code = 200 if result["status"] == "ok" else 503
     return JSONResponse(status_code=status_code, content=result)
 
@@ -74,10 +75,9 @@ async def generate_metadata(req: MetadataRequest):
             },
         )
 
-    loop = asyncio.get_event_loop()
     try:
         raw = await asyncio.wait_for(
-            loop.run_in_executor(None, _bedrock.generate, image_bytes, mime_type),
+            _provider.generate(image_bytes, mime_type),
             timeout=config.AI_TIMEOUT_S,
         )
         if isinstance(raw, str):

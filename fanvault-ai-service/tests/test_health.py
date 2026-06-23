@@ -1,10 +1,11 @@
 """
-Unit tests for the FanVault AI service (Bedrock-native).
-All external I/O (boto3, S3) is mocked via unittest.mock so tests run without AWS credentials.
+Unit tests for the FanVault AI service (Bedrock API key provider).
+All external I/O (openai, boto3/S3) is mocked so tests run without AWS credentials.
 """
+import asyncio
 import json
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from validators.metadata_validator import validate_metadata
 
@@ -45,146 +46,178 @@ def test_validate_metadata_too_many_tags():
     assert ok is False
 
 
-# ── BedrockClient unit tests ───────────────────────────────────────────────────
+# ── BedrockApiKeyProvider unit tests ──────────────────────────────────────────
 
-class TestBedrockClientGenerate(unittest.TestCase):
-    def _make_converse_response(self, text: str) -> dict:
-        return {
-            "output": {"message": {"content": [{"text": text}]}},
-            "usage": {"inputTokens": 100, "outputTokens": 50},
-        }
+def _make_chat_completion(content: str, prompt_tokens: int = 100, completion_tokens: int = 50):
+    choice = MagicMock()
+    choice.message.content = content
+    usage = MagicMock()
+    usage.prompt_tokens = prompt_tokens
+    usage.completion_tokens = completion_tokens
+    response = MagicMock()
+    response.choices = [choice]
+    response.usage = usage
+    return response
 
-    @patch("services.bedrock_client.boto3.client")
-    def test_generate_success(self, mock_boto):
+
+class TestBedrockApiKeyProviderGenerate(unittest.TestCase):
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    @patch("providers.bedrock_provider.AsyncOpenAI")
+    def test_generate_success(self, mock_openai_cls):
         payload = json.dumps(VALID_METADATA)
         mock_client = MagicMock()
-        mock_client.converse.return_value = self._make_converse_response(payload)
-        mock_boto.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=_make_chat_completion(payload)
+        )
+        mock_openai_cls.return_value = mock_client
 
-        from services.bedrock_client import BedrockClient
-        client = BedrockClient()
-        result = client.generate(b"fake-image-bytes", "image/jpeg")
+        import config as cfg
+        with patch.object(cfg, "BEDROCK_API_KEY", "test-key"), \
+             patch.object(cfg, "BEDROCK_REGION", "us-east-1"):
+            from providers.bedrock_provider import BedrockApiKeyProvider
+            provider = BedrockApiKeyProvider()
+            result = self._run(provider.generate(b"fake-image-bytes", "image/jpeg"))
 
         assert result["title"] == VALID_METADATA["title"]
         assert result["category"] == "sports"
-        mock_client.converse.assert_called_once()
+        mock_client.chat.completions.create.assert_called_once()
 
-    @patch("services.bedrock_client.boto3.client")
-    def test_generate_throttle_then_success(self, mock_boto):
-        from botocore.exceptions import ClientError
+    @patch("providers.bedrock_provider.AsyncOpenAI")
+    def test_generate_throttle_then_success(self, mock_openai_cls):
+        import openai as oai
         payload = json.dumps(VALID_METADATA)
-        throttle_error = ClientError(
-            {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
-            "Converse",
-        )
         mock_client = MagicMock()
-        mock_client.converse.side_effect = [throttle_error, self._make_converse_response(payload)]
-        mock_boto.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=[
+                oai.RateLimitError("rate limited", response=MagicMock(), body={}),
+                _make_chat_completion(payload),
+            ]
+        )
+        mock_openai_cls.return_value = mock_client
 
-        from services.bedrock_client import BedrockClient
-        with patch("services.bedrock_client.time.sleep"):  # skip actual sleep
-            client = BedrockClient()
-            result = client.generate(b"fake-image-bytes", "image/jpeg")
+        import config as cfg
+        with patch.object(cfg, "BEDROCK_API_KEY", "test-key"), \
+             patch.object(cfg, "BEDROCK_REGION", "us-east-1"), \
+             patch("providers.bedrock_provider.asyncio.sleep", new_callable=AsyncMock):
+            from providers.bedrock_provider import BedrockApiKeyProvider
+            provider = BedrockApiKeyProvider()
+            result = self._run(provider.generate(b"fake-image-bytes", "image/jpeg"))
 
         assert result["title"] == VALID_METADATA["title"]
-        assert mock_client.converse.call_count == 2
+        assert mock_client.chat.completions.create.call_count == 2
 
-    @patch("services.bedrock_client.boto3.client")
-    def test_generate_throttle_exhausted(self, mock_boto):
-        from botocore.exceptions import ClientError
-        from services.bedrock_client import BedrockThrottleError
-        throttle_error = ClientError(
-            {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
-            "Converse",
-        )
+    @patch("providers.bedrock_provider.AsyncOpenAI")
+    def test_generate_throttle_exhausted(self, mock_openai_cls):
+        import openai as oai
+        from providers.bedrock_provider import BedrockThrottleError
+        rate_err = oai.RateLimitError("rate limited", response=MagicMock(), body={})
         mock_client = MagicMock()
-        mock_client.converse.side_effect = [throttle_error, throttle_error, throttle_error]
-        mock_boto.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(side_effect=[rate_err, rate_err, rate_err])
+        mock_openai_cls.return_value = mock_client
 
-        from services.bedrock_client import BedrockClient
-        with patch("services.bedrock_client.time.sleep"):
-            client = BedrockClient()
+        import config as cfg
+        with patch.object(cfg, "BEDROCK_API_KEY", "test-key"), \
+             patch.object(cfg, "BEDROCK_REGION", "us-east-1"), \
+             patch("providers.bedrock_provider.asyncio.sleep", new_callable=AsyncMock):
+            from providers.bedrock_provider import BedrockApiKeyProvider
+            provider = BedrockApiKeyProvider()
             with self.assertRaises(BedrockThrottleError):
-                client.generate(b"fake-image-bytes", "image/jpeg")
+                self._run(provider.generate(b"fake-image-bytes", "image/jpeg"))
 
-    @patch("services.bedrock_client.boto3.client")
-    def test_generate_client_error(self, mock_boto):
-        from botocore.exceptions import ClientError
-        from services.bedrock_client import BedrockClientError
-        error = ClientError(
-            {"Error": {"Code": "ValidationException", "Message": "Invalid model"}},
-            "Converse",
+    @patch("providers.bedrock_provider.AsyncOpenAI")
+    def test_generate_auth_error(self, mock_openai_cls):
+        import openai as oai
+        from providers.bedrock_provider import BedrockClientError
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=oai.AuthenticationError("bad key", response=MagicMock(), body={})
         )
+        mock_openai_cls.return_value = mock_client
+
+        import config as cfg
+        with patch.object(cfg, "BEDROCK_API_KEY", "test-key"), \
+             patch.object(cfg, "BEDROCK_REGION", "us-east-1"):
+            from providers.bedrock_provider import BedrockApiKeyProvider
+            provider = BedrockApiKeyProvider()
+            with self.assertRaises(BedrockClientError):
+                self._run(provider.generate(b"fake-image-bytes", "image/jpeg"))
+
+    @patch("providers.bedrock_provider.AsyncOpenAI")
+    def test_generate_invalid_json_response(self, mock_openai_cls):
         mock_client = MagicMock()
-        mock_client.converse.side_effect = error
-        mock_boto.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=_make_chat_completion("not valid json {{")
+        )
+        mock_openai_cls.return_value = mock_client
 
-        from services.bedrock_client import BedrockClient
-        client = BedrockClient()
-        with self.assertRaises(BedrockClientError):
-            client.generate(b"fake-image-bytes", "image/jpeg")
+        import config as cfg
+        with patch.object(cfg, "BEDROCK_API_KEY", "test-key"), \
+             patch.object(cfg, "BEDROCK_REGION", "us-east-1"):
+            from providers.bedrock_provider import BedrockApiKeyProvider
+            provider = BedrockApiKeyProvider()
+            with self.assertRaises(json.JSONDecodeError):
+                self._run(provider.generate(b"fake-image-bytes", "image/png"))
 
-    @patch("services.bedrock_client.boto3.client")
-    def test_generate_invalid_json_response(self, mock_boto):
-        mock_client = MagicMock()
-        mock_client.converse.return_value = self._make_converse_response("not valid json {{")
-        mock_boto.return_value = mock_client
-
-        from services.bedrock_client import BedrockClient
-        client = BedrockClient()
-        with self.assertRaises(json.JSONDecodeError):
-            client.generate(b"fake-image-bytes", "image/png")
-
-    @patch("services.bedrock_client.boto3.client")
-    def test_generate_unknown_mime_falls_back_to_jpeg(self, mock_boto):
+    @patch("providers.bedrock_provider.AsyncOpenAI")
+    def test_generate_unknown_mime_falls_back_to_jpeg(self, mock_openai_cls):
         payload = json.dumps(VALID_METADATA)
         mock_client = MagicMock()
-        mock_client.converse.return_value = self._make_converse_response(payload)
-        mock_boto.return_value = mock_client
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=_make_chat_completion(payload)
+        )
+        mock_openai_cls.return_value = mock_client
 
-        from services.bedrock_client import BedrockClient
-        client = BedrockClient()
-        client.generate(b"fake-image-bytes", "image/bmp")  # bmp → falls back to jpeg
+        import config as cfg
+        with patch.object(cfg, "BEDROCK_API_KEY", "test-key"), \
+             patch.object(cfg, "BEDROCK_REGION", "us-east-1"):
+            from providers.bedrock_provider import BedrockApiKeyProvider
+            provider = BedrockApiKeyProvider()
+            self._run(provider.generate(b"fake-image-bytes", "image/bmp"))
 
-        call_kwargs = mock_client.converse.call_args[1]
-        image_block = call_kwargs["messages"][0]["content"][0]["image"]
-        assert image_block["format"] == "jpeg"
+        call_kwargs = mock_client.chat.completions.create.call_args[1]
+        image_content = call_kwargs["messages"][1]["content"][0]
+        assert "image/jpeg" in image_content["image_url"]["url"]
 
 
 # ── Health check tests ─────────────────────────────────────────────────────────
 
-class TestBedrockClientHealthCheck(unittest.TestCase):
-    @patch("services.bedrock_client.boto3.client")
-    def test_health_check_ok(self, mock_boto):
-        mock_sts = MagicMock()
-        mock_sts.get_caller_identity.return_value = {
-            "Arn": "arn:aws:sts::123456789012:assumed-role/fanvault-ai-irsa-role/session"
-        }
-        mock_boto.return_value = mock_sts
+class TestBedrockApiKeyProviderHealthCheck(unittest.TestCase):
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
 
-        from services.bedrock_client import BedrockClient
-        client = BedrockClient()
-        result = client.health_check()
+    @patch("providers.bedrock_provider.AsyncOpenAI")
+    def test_health_check_ok(self, mock_openai_cls):
+        mock_openai_cls.return_value = MagicMock()
+
+        import config as cfg
+        with patch.object(cfg, "BEDROCK_API_KEY", "test-key"), \
+             patch.object(cfg, "BEDROCK_REGION", "us-east-1"), \
+             patch.object(cfg, "BEDROCK_MODEL_ID", "amazon.nova-pro-v1:0"):
+            from providers.bedrock_provider import BedrockApiKeyProvider
+            provider = BedrockApiKeyProvider()
+            result = self._run(provider.health_check())
 
         assert result["status"] == "ok"
-        assert "iam_arn" in result
+        assert result["auth"] == "api-key"
         assert "model_id" in result
+        assert "region" in result
 
-    @patch("services.bedrock_client.boto3.client")
-    def test_health_check_no_credentials(self, mock_boto):
-        from botocore.exceptions import NoCredentialsError
-        mock_sts = MagicMock()
-        mock_sts.get_caller_identity.side_effect = NoCredentialsError()
+    @patch("providers.bedrock_provider.AsyncOpenAI")
+    def test_health_check_no_api_key(self, mock_openai_cls):
+        mock_openai_cls.return_value = MagicMock()
 
-        # First call (bedrock-runtime client creation) must succeed; second (sts) raises
-        mock_boto.side_effect = [MagicMock(), mock_sts]
-
-        from services.bedrock_client import BedrockClient
-        client = BedrockClient()
-        result = client.health_check()
+        import config as cfg
+        with patch.object(cfg, "BEDROCK_API_KEY", ""), \
+             patch.object(cfg, "BEDROCK_REGION", "us-east-1"), \
+             patch.object(cfg, "BEDROCK_MODEL_ID", "amazon.nova-pro-v1:0"):
+            from providers.bedrock_provider import BedrockApiKeyProvider
+            provider = BedrockApiKeyProvider()
+            result = self._run(provider.health_check())
 
         assert result["status"] == "degraded"
-        assert "NoCredentials" in result["error"]
+        assert "error" in result
 
 
 # ── Health endpoint shape test ─────────────────────────────────────────────────
