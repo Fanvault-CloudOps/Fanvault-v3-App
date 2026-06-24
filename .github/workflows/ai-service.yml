@@ -106,7 +106,7 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════
   docker-build:
     name: Docker Build
-    needs: snyk
+    needs: [snyk, sonar]
     runs-on: ubuntu-22.04
     outputs:
       sha-tag:     ${{ steps.tags.outputs.sha-tag }}
