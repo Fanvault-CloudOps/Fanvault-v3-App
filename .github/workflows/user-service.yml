@@ -3,7 +3,6 @@ name: CI/CD — user-service
 on:
   push:
     branches: [main, develop]
-    tags: ['v*.*.*']
     paths:
       - 'fanvault-user-service/**'
       - 'shared-resources/**'
@@ -41,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history required for SonarQube blame/new-code analysis
+          fetch-depth: 0
 
       - name: SonarQube Scan
         uses: sonarsource/sonarqube-scan-action@master
@@ -99,9 +98,8 @@ jobs:
 
   # ════════════════════════════════════════════════════════════════════════
   # 3. DOCKER BUILD
-  #    main   → semver tag (v1.2.3) via conventional commits + sha + latest
-  #    v* tag → version tag to ECR prod
-  #    other  → dev-<SHA> tag to ECR dev
+  #    develop → dev-<SHA> tag
+  #    main    → semver tag computed via conventional commits (dry-run)
   # ════════════════════════════════════════════════════════════════════════
   docker-build:
     name: Docker Build
@@ -112,7 +110,6 @@ jobs:
       publish-tag: ${{ steps.tags.outputs.publish-tag }}
       semver-tag:  ${{ steps.semver.outputs.new_tag }}
       is-main:     ${{ steps.tags.outputs.is-main }}
-      is-tag:      ${{ steps.tags.outputs.is-tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -127,15 +124,9 @@ jobs:
 
           if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "is-main=true"        >> $GITHUB_OUTPUT
-            echo "is-tag=false"        >> $GITHUB_OUTPUT
             echo "publish-tag=pending" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "is-main=false"                   >> $GITHUB_OUTPUT
-            echo "is-tag=true"                     >> $GITHUB_OUTPUT
-            echo "publish-tag=${GITHUB_REF_NAME}"  >> $GITHUB_OUTPUT
           else
             echo "is-main=false"            >> $GITHUB_OUTPUT
-            echo "is-tag=false"             >> $GITHUB_OUTPUT
             echo "publish-tag=dev-${SHORT}" >> $GITHUB_OUTPUT
           fi
 
@@ -169,7 +160,7 @@ jobs:
           retention-days: 1
 
   # ════════════════════════════════════════════════════════════════════════
-  # 4. TRIVY IMAGE SCAN  (blocking on CRITICAL/HIGH — exit-code 1)
+  # 4. TRIVY IMAGE SCAN  (blocking on CRITICAL/HIGH/MEDIUM — exit-code 1)
   # ════════════════════════════════════════════════════════════════════════
   trivy-scan:
     name: Trivy Image Scan
@@ -222,14 +213,12 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
 
   # ════════════════════════════════════════════════════════════════════════
-  # 5. DOCKER PUSH — DEV  (main branch + develop/feature, skipped on PR)
-  #    main    → semver + sha + latest → ECR dev, creates git release tag
-  #    other   → dev-<SHA>            → ECR dev
+  # 5. DOCKER PUSH — DEV  (develop / feature branches only, skipped on main + PRs)
   # ════════════════════════════════════════════════════════════════════════
   docker-push:
     name: Push to ECR Dev
     needs: [docker-build, trivy-scan]
-    if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name != 'pull_request' && github.ref != 'refs/heads/main'
     runs-on: ubuntu-22.04
     outputs:
       pushed-tag:  ${{ steps.pushed.outputs.tag }}
@@ -257,52 +246,18 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Push dev-SHA tag (develop / feature branches)
-        if: needs.docker-build.outputs.is-main != 'true'
+      - name: Push dev tag to ECR dev
         run: |
           DEV_TAG="${{ needs.docker-build.outputs.publish-tag }}"
           docker tag  ${{ env.ECR_DEV }}:${{ needs.docker-build.outputs.sha-tag }} \
                       ${{ env.ECR_DEV }}:${DEV_TAG}
           docker push ${{ env.ECR_DEV }}:${DEV_TAG}
 
-      - name: Push semver + sha + latest (main branch)
-        id: push-main
-        if: needs.docker-build.outputs.is-main == 'true'
-        run: |
-          SEMVER="${{ needs.docker-build.outputs.semver-tag }}"
-          SHA_TAG="${{ needs.docker-build.outputs.sha-tag }}"
-          docker tag  ${{ env.ECR_DEV }}:${SHA_TAG} ${{ env.ECR_DEV }}:${SEMVER}
-          docker tag  ${{ env.ECR_DEV }}:${SHA_TAG} ${{ env.ECR_DEV }}:latest
-          docker push ${{ env.ECR_DEV }}:${SHA_TAG}
-          DIGEST=$(docker push ${{ env.ECR_DEV }}:${SEMVER} | grep "digest:" | awk '{print $3}')
-          docker push ${{ env.ECR_DEV }}:latest
-          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
-
-      - name: Create Git release tag (main only)
-        if: needs.docker-build.outputs.is-main == 'true'
-        uses: mathieudutour/github-tag-action@v6.2
-        with:
-          github_token: ${{ github.token }}
-          custom_tag: ${{ needs.docker-build.outputs.semver-tag }}
-          tag_prefix: ''
-
-      - name: Attest image provenance (main only)
-        if: needs.docker-build.outputs.is-main == 'true' && steps.push-main.outputs.digest != ''
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name:   ${{ env.ECR_DEV }}
-          subject-digest: ${{ steps.push-main.outputs.digest }}
-          push-to-registry: true
-
       - name: Set pushed tag output
         id: pushed
         run: |
-          if [[ "${{ needs.docker-build.outputs.is-main }}" == "true" ]]; then
-            echo "tag=${{ needs.docker-build.outputs.semver-tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${{ needs.docker-build.outputs.publish-tag }}" >> $GITHUB_OUTPUT
-          fi
-          echo "repo=${{ env.ECR_DEV }}" >> $GITHUB_OUTPUT
+          echo "tag=${{ needs.docker-build.outputs.publish-tag }}" >> $GITHUB_OUTPUT
+          echo "repo=${{ env.ECR_DEV }}"                           >> $GITHUB_OUTPUT
 
       - name: Write push summary
         run: |
@@ -316,18 +271,21 @@ jobs:
           } >> $GITHUB_STEP_SUMMARY
 
   # ════════════════════════════════════════════════════════════════════════
-  # 6. DOCKER PUSH — PROD  (v* tags only, requires environment approval)
+  # 6. DOCKER PUSH — PROD  (main branch only, requires environment approval)
+  #    Pushes semver + latest to ECR prod, then creates a GitHub Release.
   # ════════════════════════════════════════════════════════════════════════
   docker-push-prod:
-    name: Push to ECR Prod (approval required)
+    name: Push to ECR Prod + Create Release (approval required)
     needs: [docker-build, trivy-scan]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     environment: prod
     runs-on: ubuntu-22.04
     outputs:
       pushed-tag:  ${{ steps.pushed.outputs.tag }}
       pushed-repo: ${{ steps.pushed.outputs.repo }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download image artifact
         uses: actions/download-artifact@v4
         with:
@@ -346,14 +304,29 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Tag and push version to ECR prod
+      - name: Tag and push semver + latest to ECR prod
         id: push-prod
         run: |
-          VERSION_TAG="${{ needs.docker-build.outputs.publish-tag }}"
-          docker tag  ${{ env.ECR_DEV }}:${{ needs.docker-build.outputs.sha-tag }} \
-                      ${{ env.ECR_PROD }}:${VERSION_TAG}
-          DIGEST=$(docker push ${{ env.ECR_PROD }}:${VERSION_TAG} | grep "digest:" | awk '{print $3}')
+          SEMVER="${{ needs.docker-build.outputs.semver-tag }}"
+          SHA_TAG="${{ needs.docker-build.outputs.sha-tag }}"
+
+          docker tag ${{ env.ECR_DEV }}:${SHA_TAG} ${{ env.ECR_PROD }}:${SEMVER}
+          docker tag ${{ env.ECR_DEV }}:${SHA_TAG} ${{ env.ECR_PROD }}:latest
+
+          DIGEST=$(docker push ${{ env.ECR_PROD }}:${SEMVER} | grep "digest:" | awk '{print $3}')
+          docker push ${{ env.ECR_PROD }}:latest
+
+          echo "semver=${SEMVER}" >> $GITHUB_OUTPUT
           echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create ${{ steps.push-prod.outputs.semver }} \
+            --title "Release ${{ steps.push-prod.outputs.semver }} — ${{ env.SERVICE }}" \
+            --generate-notes \
+            --target main
 
       - name: Attest image provenance
         if: steps.push-prod.outputs.digest != ''
@@ -366,8 +339,8 @@ jobs:
       - name: Set pushed tag output
         id: pushed
         run: |
-          echo "tag=${{ needs.docker-build.outputs.publish-tag }}" >> $GITHUB_OUTPUT
-          echo "repo=${{ env.ECR_PROD }}"                          >> $GITHUB_OUTPUT
+          echo "tag=${{ steps.push-prod.outputs.semver }}" >> $GITHUB_OUTPUT
+          echo "repo=${{ env.ECR_PROD }}"                  >> $GITHUB_OUTPUT
 
       - name: Write push summary
         run: |
@@ -377,7 +350,7 @@ jobs:
             echo "| Key | Value |"
             echo "|-----|-------|"
             echo "| ECR Repository | ${{ env.ECR_PROD }} |"
-            echo "| Pushed Tag | ${{ steps.pushed.outputs.tag }} |"
+            echo "| Pushed Tag | ${{ steps.push-prod.outputs.semver }} |"
           } >> $GITHUB_STEP_SUMMARY
 
   # ════════════════════════════════════════════════════════════════════════
@@ -407,12 +380,12 @@ jobs:
       - name: Resolve values file and new tag
         id: resolve
         run: |
-          if [[ "${{ needs.docker-build.outputs.is-tag }}" == "true" ]]; then
-            echo "values-file=${{ env.GITOPS_VALUES_PROD }}"                >> $GITHUB_OUTPUT
-            echo "new-tag=${{ needs.docker-push-prod.outputs.pushed-tag }}" >> $GITHUB_OUTPUT
+          if [[ "${{ needs.docker-build.outputs.is-main }}" == "true" ]]; then
+            echo "values-file=${{ env.GITOPS_VALUES_PROD }}"                  >> $GITHUB_OUTPUT
+            echo "new-tag=${{ needs.docker-push-prod.outputs.pushed-tag }}"   >> $GITHUB_OUTPUT
           else
-            echo "values-file=${{ env.GITOPS_VALUES_DEV }}"             >> $GITHUB_OUTPUT
-            echo "new-tag=${{ needs.docker-push.outputs.pushed-tag }}"  >> $GITHUB_OUTPUT
+            echo "values-file=${{ env.GITOPS_VALUES_DEV }}"              >> $GITHUB_OUTPUT
+            echo "new-tag=${{ needs.docker-push.outputs.pushed-tag }}"   >> $GITHUB_OUTPUT
           fi
 
       - name: Update image tag in values.yaml
@@ -456,7 +429,7 @@ jobs:
           fi
 
   # ════════════════════════════════════════════════════════════════════════
-  # 8. SMOKE TEST — dev environment health check post-deploy
+  # 8. SMOKE TEST — dev environment health check (develop only)
   # ════════════════════════════════════════════════════════════════════════
   smoke-test:
     name: Smoke Test (Dev)
@@ -465,7 +438,7 @@ jobs:
       always() &&
       needs.helm-updater.result == 'success' &&
       github.event_name != 'pull_request' &&
-      !startsWith(github.ref, 'refs/tags/v')
+      github.ref != 'refs/heads/main'
     runs-on: ubuntu-22.04
     steps:
       - name: Wait for ArgoCD sync
