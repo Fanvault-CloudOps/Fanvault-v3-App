@@ -1,532 +1,563 @@
-# FanVault v2 — Cloud-Native 3-Microservice AWS Architecture
+# FanVault v3 — Fan Merchandise E-Commerce Platform
 
-Welcome to **FanVault v2**, a production-grade, highly available, secure, and auto-scaling e-commerce platform for fan merchandise. 
-
-This repository documents the complete end-to-end infrastructure, application deployment, networking, and security architecture of the platform. By following this guide, anyone with basic AWS experience will be able to replicate and deploy this system from scratch.
+FanVault is a production-grade e-commerce platform for fan merchandise (sports, entertainment, franchise collectibles). v3 migrated the database from MongoDB to **AWS DynamoDB** and integrated a full event-driven pipeline with EventBridge, Lambda consumers, and SNS alerting, all exposed through CloudFront with WAFv2 protection.
 
 ---
 
-## 1. Architectural Blueprint
-
-FanVault v2 consolidates a legacy 6-microservice structure into **3 independently deployable services** running on a secure, cross-region virtual private cloud network:
+## Repository Structure
 
 ```
-Region: us-east-1 (N. Virginia)                  Region: ap-south-1 (Mumbai)
-┌──────────────────────────────────────────────┐ ┌────────────────────────────────┐
-│ PRIMARY APPLICATION VPC (10.0.0.0/16)        │ │ DATABASE VPC (10.1.0.0/16)     │
-│                                              │ │                                │
-│ [ Public Subnets ]                           │ │                                │
-│   ├─ Application Load Balancer               │ │                                │
-│   ├─ Public NAT Gateway                      │ │                                │
-│   └─ Public Bastion Host                     │ │                                │
-│                                              │ │                                │
-│ [ Private Subnets ]                          │ │                                │
-│   ├─ Nginx / React SPA ASG (Port 80)         │ │                                │
-│   ├─ Identity Service ASG (Port 3001)  ──────┼─┼─► [ VPC Peering (pcx) ]        │
-│   └─ Commerce Service ASG (Port 3002)  ──────┼─┼─►   (AWS private backbone)     │
-│                                              │ │     │                          │
-│ [ Route53 Private Hosted Zone ]              │ │     ▼                          │
-│   └─ db.fanvault.internal ───────────────────┼─┼─► [ MongoDB EC2 :27017 ]       │
-│                                              │ │   (Private IP: 10.1.31.100)    │
-└──────────────────────────────────────────────┘ └────────────────────────────────┘
+Fanvault-v3-App/
+├── fanvault-user-auth-service/     # Identity Service — Node.js/Express (port 3001)
+│   ├── src/
+│   │   ├── config/db.js            # DynamoDB client init + optional Secrets Manager
+│   │   ├── controllers/            # auth.controller.js, user.controller.js
+│   │   ├── middleware/auth.middleware.js
+│   │   ├── models/                 # User.js, UserProfile.js (DynamoDB repos)
+│   │   └── routes/                 # auth.routes.js, user.routes.js
+│   ├── deploy/
+│   │   ├── fanvault-auth.service   # systemd unit file
+│   │   └── deploy.sh
+│   ├── .env.example
+│   └── package.json
+│
+├── fanvault-commerce-service/      # Commerce Service — Node.js/Express (port 3002)
+│   ├── src/
+│   │   ├── config/db.js            # DynamoDB client init + optional Secrets Manager
+│   │   ├── controllers/            # product.controller.js, order.controller.js, admin.controller.js
+│   │   ├── middleware/auth.middleware.js
+│   │   ├── models/                 # Product.js, Order.js, AuditLog.js, Metadata.js
+│   │   ├── routes/                 # product.routes.js, order.routes.js, admin.routes.js
+│   │   └── utils/
+│   │       ├── eventPublisher.js   # EventBridge PutEvents
+│   │       ├── snsPublisher.js     # Structured SNS alert publisher
+│   │       └── auditLogger.js      # Fire-and-forget audit log writer (DynamoDB)
+│   ├── deploy/
+│   │   ├── fanvault-commerce.service
+│   │   └── deploy.sh
+│   ├── .env.example
+│   └── package.json
+│
+├── fanvault-frontend/              # React 18 SPA — Vite build, served by Nginx
+│   ├── src/
+│   │   ├── App.jsx                 # Routing (public + protected + admin portal)
+│   │   ├── api/client.js           # Axios instance with auth interceptors
+│   │   ├── context/                # AuthContext.jsx, CartContext.jsx
+│   │   ├── components/             # Navbar, Footer, ProductCard, ErrorBoundary
+│   │   └── pages/                  # HomePage, Products, Cart, Checkout, Orders, Profile
+│   │       └── admin/              # AdminDashboard, Products, Inventory, Categories, Orders, Audit
+│   ├── nginx.conf                  # Nginx static server + API proxy config
+│   ├── vite.config.js
+│   ├── .env.example
+│   └── package.json
+│
+├── shared-resources/
+│   ├── database/seed-data.js       # MongoDB seed (legacy v2)
+│   │               seed-dynamodb.js # DynamoDB seed script
+│   ├── migrate-to-dynamodb.js      # One-time migration helper (v2 → v3)
+│   ├── healthcheck/healthcheck.sh
+│   └── nginx/alb-listener.conf
+│
+└── deploy/
+    ├── aws-userdata-app.sh         # EC2 user data — provisions both backend services + frontend
+    └── aws-userdata-db.sh          # EC2 user data — MongoDB setup (v2 legacy)
 ```
-<img width="3075" height="3263" alt="architecture png" src="https://github.com/user-attachments/assets/3fbbf997-773c-4d25-903a-7ec511e4112f" />
 
-### Core Architecture Specifications
+---
 
-| Resource / Layer | Region | IP Range / CIDR | Details |
+## Architecture
+
+### Overview
+
+All user traffic enters through a single **CloudFront distribution** protected by **WAFv2**. CloudFront forwards requests to two origins: an **Application Load Balancer** (ALB) for all dynamic content and a private **S3 bucket** (via OAC) for product media. The ALB rejects any request that does not carry a secret `X-Custom-Header`, preventing direct access that bypasses CloudFront.
+
+Behind the ALB, EC2 instances in private subnets run **both** Node.js microservices on the same host — the Identity Service on port 3001 and the Commerce Service on port 3002. Nginx on the frontend instances is a pure static file server; all API routing is handled by the ALB.
+
+Product image uploads use **S3 presigned URLs**: the browser requests a short-lived PUT URL from the Commerce Service, then uploads directly to S3 — bypassing the backend entirely. The image is then served globally via the CloudFront distribution.
+
+All commerce domain events are published to an **EventBridge custom bus**, which fans out to three Lambda consumers (audit logging, thumbnail generation, inventory monitoring) and directly to SNS alert topics.
+
+---
+
+### Architecture Diagram
+
+```
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │  INTERNET                                                                   │
+  └───────────┬───────────────────────────────────────────────┬─────────────────┘
+              │ HTTPS                                          │ PUT (presigned URL)
+              ▼                                               ▼
+  ┌───────────────────────┐                       ┌─────────────────────────────┐
+  │  AWS WAFv2 Web ACL    │                       │  S3 Product Images Bucket   │
+  │  ┌─────────────────┐  │                       │  (private, versioned)       │
+  │  │ CommonRuleSet   │  │                       │  products/  thumbnails/     │
+  │  │ KnownBadInputs  │  │                       │  categories/                │
+  │  │ IP Reputation   │  │                       └──────────────┬──────────────┘
+  │  │ Rate Limit 100  │  │                                      │ OAC (SigV4)
+  │  │ Geo Block (opt) │  │                                      │
+  └───────────┬───────────┘                                      │
+              │                                                  │
+              ▼                                                  ▼
+  ┌───────────────────────────────────────────────────────────────────────────┐
+  │                     CloudFront Distribution                               │
+  │                                                                           │
+  │  Path routing (ordered cache behaviors):                                  │
+  │  /products/*  /thumbnails/*  /categories/*  /images/*  ──► S3 Origin     │
+  │  /api/*  (CachingDisabled, AllViewer policy)            ──► ALB Origin    │
+  │  /*  (default)                                          ──► ALB Origin    │
+  │                                                                           │
+  │  All ALB-bound requests inject:  X-Custom-Header: <secret>               │
+  └──────────────────────────────┬────────────────────────────────────────────┘
+                                 │ HTTP (custom header required on all paths)
+                                 ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │              Application Load Balancer  (internet-facing)               │
+  │              Accepts traffic from CloudFront prefix list only           │
+  │                                                                         │
+  │  Default action: 403 Forbidden (blocks direct access)                  │
+  │                                                                         │
+  │  Listener rules (all require X-Custom-Header match):                   │
+  │  P5  — Host: arch.fanvault.com              ──► Lambda TG              │
+  │  P10 — /api/auth*                           ──► Identity TG  (:3001)   │
+  │  P15 — /api/admin*                          ──► Commerce TG  (:3002)   │
+  │  P20 — /api/users*                          ──► Identity TG  (:3001)   │
+  │  P30 — /api/products*                       ──► Commerce TG  (:3002)   │
+  │  P40 — /api/orders*                         ──► Commerce TG  (:3002)   │
+  │  P99 — /*                                   ──► Frontend TG  (:80)     │
+  └───────┬────────────────────────┬──────────────────────┬─────────────────┘
+          │                        │                       │
+          ▼                        ▼                       ▼
+  ┌──────────────┐    ┌────────────────────────┐    ┌──────────────┐
+  │  Frontend    │    │    Backend ASG          │    │  Lambda      │
+  │  ASG         │    │  (both services on      │    │  arch-page   │
+  │              │    │   same EC2 instance)    │    │  (Node.js    │
+  │  Nginx :80   │    │                         │    │   20.x)      │
+  │  React SPA   │    │  ┌───────────────────┐  │    └──────┬───────┘
+  │  (static)    │    │  │ Identity Service  │  │           │
+  │              │    │  │ Node.js :3001     │  │           │ S3 GetObject
+  │  Private     │    │  │ fanvault-auth     │  │           ▼
+  │  frontend    │    │  │ (systemd)         │  │    ┌──────────────┐
+  │  subnets     │    │  └────────┬──────────┘  │    │  S3 Arch     │
+  └──────────────┘    │           │             │    │  Bucket      │
+                      │  ┌────────▼──────────┐  │    └──────────────┘
+                      │  │ Commerce Service  │  │
+                      │  │ Node.js :3002     │  │
+                      │  │ fanvault-commerce │  │
+                      │  │ (systemd)         │  │
+                      │  └────────┬──────────┘  │
+                      │           │             │
+                      │   Private backend        │
+                      │   subnets               │
+                      └───────────┬─────────────┘
+                                  │
+                  ┌───────────────┼────────────────────┐
+                  │               │                    │
+                  ▼               ▼                    ▼
+  ┌─────────────────────┐  ┌──────────────┐   ┌──────────────────────┐
+  │  DynamoDB (6 tables)│  │  SSM Param   │   │  EventBridge         │
+  │  via VPC Gateway    │  │  Store       │   │  fanvault-event-bus  │
+  │  Endpoint           │  │  /fanvault/* │   │  source:             │
+  │                     │  │  (config)    │   │  fanvault.commerce   │
+  │  fanvault-users     │  └──────────────┘   └──────────┬───────────┘
+  │  fanvault-profiles  │                                 │
+  │  fanvault-products  │                    ┌────────────┼────────────────┐
+  │  fanvault-orders    │                    │            │                │
+  │  fanvault-audit-logs│                    ▼            ▼                ▼
+  │  fanvault-metadata  │           ┌─────────────┐ ┌──────────────┐ ┌──────────────┐
+  └─────────────────────┘           │  Lambda     │ │  Lambda      │ │  Lambda      │
+                                    │  Audit Log  │ │  Thumbnail   │ │  Inventory   │
+                                    │  Consumer   │ │  Generator   │ │  Monitor     │
+                                    └──────┬──────┘ └──────┬───────┘ └──────┬───────┘
+                                           │               │                │
+                                           ▼               ▼                ▼
+                                    ┌─────────────────────────────────────────────────┐
+                                    │  SNS Topics (KMS-encrypted)                     │
+                                    │  fanvault-low-inventory-alerts                  │
+                                    │  fanvault-order-failure-alerts                  │
+                                    │  fanvault-product-upload-failures               │
+                                    │  fanvault-admin-operational-alerts              │
+                                    └─────────────────────────────────────────────────┘
+                                                          │
+                                                          ▼
+                                    ┌─────────────────────────────────────────────────┐
+                                    │  SQS Queues (fan-out, 14-day retention)         │
+                                    │  + optional email subscription (alert_email)    │
+                                    └─────────────────────────────────────────────────┘
+
+  ┌──────────────┐
+  │  Bastion     │  SSH jump host (public subnet)
+  │  t3.micro    │  → connects to frontend and backend
+  └──────────────┘    private instances via Bastion SG
+```
+
+---
+
+### Traffic Routing Detail
+
+| Entry Point | Request Type | Path | Handler |
 |---|---|---|---|
-| **Primary VPC** | `us-east-1` (N. Virginia) | `10.0.0.0/16` | Hosts ALB, NAT, Bastion, Nginx Frontend ASG, Identity ASG, Commerce ASG. |
-| **Database VPC** | `ap-south-1` (Mumbai) | `10.1.0.0/16` | Enclave VPC hosting the MongoDB database server. Completely isolated from the internet. |
-| **VPC Peering** | Cross-Region | `pcx-xxxxx` | Private peered link connecting N. Virginia and Mumbai VPCs over AWS private backbone. |
-| **Private DNS** | Route53 PHZ | `fanvault.internal` | Internal DNS resolving `db.fanvault.internal` $\rightarrow$ `10.1.31.100` across regions. |
-| **Frontend ASG** | `us-east-1` | `10.0.11.0/24` (1a) <br> `10.0.12.0/24` (1b) | Runs static compiled React SPA hosted on Nginx (Port 80). |
-| **Backend ASGs** | `us-east-1` | `10.0.21.0/24` (1a) <br> `10.0.22.0/24` (1b) | Identity Service (Port 3001) & Commerce Service (Port 3002). |
-| **MongoDB EC2** | `ap-south-1` | `10.1.31.0/24` (1a) | Natively installed MongoDB 7.0 on Ubuntu 22.04 LTS (`t3.medium`). |
+| Browser | HTTPS | `/products/*`, `/thumbnails/*`, `/categories/*` | CloudFront → S3 (cached) |
+| Browser | HTTPS | `/api/auth/*`, `/api/users/*` | CloudFront → ALB → Identity Service `:3001` |
+| Browser | HTTPS | `/api/products/*`, `/api/orders/*`, `/api/admin/*` | CloudFront → ALB → Commerce Service `:3002` |
+| Browser | HTTPS | `/*` (all other) | CloudFront → ALB → Nginx → React SPA |
+| Admin | HTTPS | `arch.fanvault.com` | CloudFront → ALB → Lambda → S3 Arch Bucket |
+| Admin browser | HTTPS PUT | presigned S3 URL | Direct to S3 (bypasses backend) |
 
 ---
 
-## 2. Security Groups Rule Matrix
+## Services
 
-To enforce a **defense-in-depth** security model, security groups are chained logically (instances accept connections exclusively from the security group of the resource directly upstream):
+### Identity Service (`fanvault-user-auth-service`)
 
-| Security Group Name | VPC / Region | Inbound Allowed Port/Protocol | Allowed Source | Architectural Rationale |
+**Port:** `3001` | **Runtime:** Node.js ≥ 18 | **Database:** DynamoDB (`fanvault-users`, `fanvault-profiles`)
+
+Handles user registration, authentication (JWT access + refresh tokens), and profile management. Issues short-lived access tokens (15 min) and long-lived refresh tokens (7 days). The `JWT_SECRET` is shared read-only with the Commerce Service for token verification; `JWT_REFRESH_SECRET` stays in this service only.
+
+On startup, optionally fetches `JWT_SECRET` and `JWT_REFRESH_SECRET` from AWS Secrets Manager (enabled by `USE_SECRETS_MANAGER=true`). Validates connectivity to the `fanvault-users` DynamoDB table before accepting traffic.
+
+**Rate limiting:** `/api/auth/*` — 100 requests per 15 minutes per IP.
+
+#### API Reference
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/health` | None | Service health check — returns DB connectivity status |
+| `POST` | `/api/auth/register` | None | Register new user (email + password) |
+| `POST` | `/api/auth/login` | None | Login — returns `accessToken` + `refreshToken` |
+| `POST` | `/api/auth/refresh` | None | Exchange refresh token for a new access token |
+| `GET` | `/api/auth/verify` | Bearer | Validate and decode access token |
+| `POST` | `/api/auth/logout` | None | Stateless logout (client-side token discard) |
+| `GET` | `/api/users/me` | Bearer | Fetch own profile |
+| `POST` | `/api/users/me` | Bearer | Create profile (post-registration) |
+| `PATCH` | `/api/users/me` | Bearer | Update profile fields |
+| `POST` | `/api/users/me/addresses` | Bearer | Add shipping address |
+| `DELETE` | `/api/users/me/addresses/:id` | Bearer | Remove shipping address |
+
+#### Environment Variables
+
+| Variable | Required | Secret | Default | Description |
 |---|---|---|---|---|
-| **`fanvault-alb-sg`** | `us-east-1` | `TCP 80` (HTTP)<br>`TCP 443` (HTTPS) | `0.0.0.0/0` (Internet) | Public-facing edge ingress. Terminates TLS using ACM wildcard certificate. |
-| **`fanvault-frontend-sg`** | `us-east-1` | `TCP 80` | `fanvault-alb-sg` | Nginx servers hosting React static files. Blocks direct internet access. |
-| **`fanvault-backend-sg`** | `us-east-1` | `TCP 3001` (Identity)<br>`TCP 3002` (Commerce) | `fanvault-alb-sg` | Node.js Express backend servers. Only accepts API requests routed via the ALB. |
-| **`fanvault-db-sg`** | `ap-south-1` | `TCP 27017` (MongoDB) | `10.0.0.0/16` (Primary VPC CIDR) | MongoDB isolated enclave. Accepts database traffic solely from peered VPC networks. |
-| **`fanvault-bastion-sg`** | `us-east-1` | `TCP 22` (SSH) | *Your Administrator Public IP* | Gatekeeper for administrative SSH connections. |
+| `PORT` | Yes | No | `3001` | Express listening port |
+| `NODE_ENV` | Yes | No | — | `production` / `development` |
+| `AWS_REGION` | Yes | No | `us-east-1` | Region for DynamoDB + Secrets Manager |
+| `DYNAMODB_TABLE_USERS` | Yes | No | `fanvault-users` | DynamoDB table for auth credentials |
+| `DYNAMODB_TABLE_PROFILES` | Yes | No | `fanvault-profiles` | DynamoDB table for user profiles |
+| `JWT_SECRET` | Yes | **Yes** | — | Access token signing key (≥ 32 chars, shared with Commerce) |
+| `JWT_EXPIRES_IN` | No | No | `15m` | Access token TTL |
+| `JWT_REFRESH_SECRET` | Yes | **Yes** | — | Refresh token signing key (different from JWT_SECRET) |
+| `JWT_REFRESH_EXPIRES_IN` | No | No | `7d` | Refresh token TTL |
+| `CORS_ORIGIN` | Yes | No | — | Allowed client origin |
+| `USE_SECRETS_MANAGER` | No | No | `false` | Fetch JWT secrets from Secrets Manager at startup |
+| `SECRET_ID` | No | No | `production/fanvault-auth` | Secrets Manager secret ID |
 
 ---
 
-## 3. Step-by-Step Infrastructure Provisioning
+### Commerce Service (`fanvault-commerce-service`)
 
-Follow these steps sequentially to build the cross-region architecture.
+**Port:** `3002` | **Runtime:** Node.js ≥ 18 | **Database:** DynamoDB (`fanvault-products`, `fanvault-orders`, `fanvault-audit-logs`, `fanvault-metadata`)
 
-### STEP 1: Deploy Networking (Part A: N. Virginia)
-*Switch your AWS Management Console region to **`us-east-1` (N. Virginia)**.*
+Handles the product catalog, order lifecycle, admin operations, and product image management. Reads S3 bucket config from **SSM Parameter Store** at runtime (cached after first fetch) — no S3 credentials are hardcoded.
 
-1. **Create the Primary VPC**:
-   - Go to **VPC Console** $\rightarrow$ **Create VPC**.
-   - Select **VPC only**. Tag Name: `fanvault-vpc` | IPv4 CIDR block: `10.0.0.0/16`.
-   - After creation, click **Actions** $\rightarrow$ **Edit VPC settings** $\rightarrow$ Check ✅ **Enable DNS hostnames** $\rightarrow$ **Save**.
-2. **Create the Internet Gateway**:
-   - Left sidebar $\rightarrow$ **Internet Gateways** $\rightarrow$ **Create internet gateway**. Name: `fanvault-igw`.
-   - Select it $\rightarrow$ Click **Actions** $\rightarrow$ **Attach to VPC** $\rightarrow$ Select `fanvault-vpc`.
-3. **Deploy the 6 Subnets**:
-   Go to **Subnets** $\rightarrow$ **Create subnet** $\rightarrow$ Select `fanvault-vpc`. Add the subnets:
-   - `fanvault-public-1a` | Availability Zone: `us-east-1a` | CIDR: `10.0.1.0/24`
-   - `fanvault-public-1b` | Availability Zone: `us-east-1b` | CIDR: `10.0.2.0/24`
-   - `fanvault-frontend-1a` | Availability Zone: `us-east-1a` | CIDR: `10.0.11.0/24`
-   - `fanvault-frontend-1b` | Availability Zone: `us-east-1b` | CIDR: `10.0.12.0/24`
-   - `fanvault-backend-1a` | Availability Zone: `us-east-1a` | CIDR: `10.0.21.0/24`
-   - `fanvault-backend-1b` | Availability Zone: `us-east-1b` | CIDR: `10.0.22.0/24`
-4. **Enable Auto-Assign Public IP on Public Subnets**:
-   - Select `fanvault-public-1a` $\rightarrow$ **Actions** $\rightarrow$ **Edit subnet settings** $\rightarrow$ Check ✅ **Enable auto-assign public IPv4 address** $\rightarrow$ **Save**.
-   - Repeat the same steps for `fanvault-public-1b`.
-5. **Create the NAT Gateway**:
-   - Left sidebar $\rightarrow$ **NAT Gateways** $\rightarrow$ **Create NAT gateway**.
-   - Name: `fanvault-nat-gw` | Subnet: `fanvault-public-1a` | Connectivity type: Public.
-   - Click **Allocate Elastic IP** $\rightarrow$ Click **Create NAT gateway**.
-6. **Set up Route Tables**:
-   - **Public Route Table (`fanvault-rt-public`)**: 
-     * Create route table. Select VPC: `fanvault-vpc`.
-     * Click **Routes** tab $\rightarrow$ **Edit routes** $\rightarrow$ **Add route**: Destination `0.0.0.0/0` $\rightarrow$ Target: **Internet Gateway** (`fanvault-igw`).
-     * Click **Subnet associations** $\rightarrow$ **Edit** $\rightarrow$ Select `fanvault-public-1a` and `fanvault-public-1b` $\rightarrow$ **Save**.
-   - **Private Route Table (`fanvault-rt-private`)**:
-     * Create route table. Select VPC: `fanvault-vpc`.
-     * Click **Routes** tab $\rightarrow$ **Edit routes** $\rightarrow$ **Add route**: Destination `0.0.0.0/0` $\rightarrow$ Target: **NAT Gateway** (`fanvault-nat-gw`).
-     * Click **Subnet associations** $\rightarrow$ **Edit** $\rightarrow$ Select all 4 private subnets (`frontend-1a/1b` and `backend-1a/1b`) $\rightarrow$ **Save**.
+**Image uploads** use **presigned PUT URLs**: the admin requests a URL from `GET /api/products/upload-url`, the browser uploads directly to S3, then the product is created/updated with the resulting S3 key. Images are served publicly via CloudFront (OAC). Accepted types: JPEG, PNG, WebP, GIF. Max size: 5 MB per file.
 
----
+**Event publishing:** every product create/update, order placement, and inventory threshold breach publishes a domain event to the `fanvault-event-bus` EventBridge bus (source: `fanvault.commerce`). EventBridge fans the events out to audit-logging, thumbnail-generation, and inventory-monitoring Lambda consumers.
 
-### STEP 2: Deploy Networking (Part B: Mumbai Database VPC)
-*Switch your AWS Management Console region to **`ap-south-1` (Mumbai)**.*
+**Audit logging:** all admin actions (product create/update/delete, stock updates, image URL generation, category changes) are written to `fanvault-audit-logs` as fire-and-forget — failures never block the request.
 
-1. **Create the Database VPC**:
-   - Go to **VPC Console** $\rightarrow$ **Create VPC** $\rightarrow$ **VPC only**.
-   - Tag Name: `fanvault-db-vpc` | IPv4 CIDR block: `10.1.0.0/16`.
-   - Select it $\rightarrow$ **Actions** $\rightarrow$ **Edit VPC settings** $\rightarrow$ Check ✅ **Enable DNS hostnames** $\rightarrow$ **Save**.
-2. **Create the DB Private Subnet**:
-   - Go to **Subnets** $\rightarrow$ **Create subnet** $\rightarrow$ Select `fanvault-db-vpc`.
-   - Name: `fanvault-db-private-1a` | Availability Zone: `ap-south-1a` | CIDR: `10.1.31.0/24`.
-3. **Create the DB Route Table**:
-   - Go to **Route Tables** $\rightarrow$ **Create route table**. Tag Name: `fanvault-db-rt` | VPC: `fanvault-db-vpc`.
-   - **Subnet associations** $\rightarrow$ **Edit** $\rightarrow$ Select `fanvault-db-private-1a` $\rightarrow$ **Save**. (Leave routes default local-only for now; no internet access allowed).
+#### API Reference
 
----
+**Products**
 
-### STEP 3: Establish Inter-Region VPC Peering
-*Switch your console region back to **`us-east-1` (N. Virginia)**.*
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/health` | None | Service health check |
+| `GET` | `/api/products` | None | List products (filters: `category`, `franchise`, `franchiseType`, `search`, `minPrice`, `maxPrice`; cursor pagination via `lastKey`) |
+| `GET` | `/api/products/bulk` | None | Batch fetch products by comma-separated `ids` |
+| `GET` | `/api/products/:id` | None | Single product detail |
+| `POST` | `/api/products` | Admin | Create product |
+| `PATCH` | `/api/products/:id` | Admin | Update product fields / stock |
+| `DELETE` | `/api/products/:id` | Admin | Soft-delete (deactivate) product |
+| `GET` | `/api/products/upload-url` | Admin | Get S3 presigned PUT URL (`fileType`, `fileSize`, `folder` query params) |
 
-1. **Request the Peering Connection**:
-   - VPC Console $\rightarrow$ **Peering connections** $\rightarrow$ **Create peering connection**.
-   - Name: `fanvault-db-peering`.
-   - **VPC ID (Requester)**: Select `fanvault-vpc` (`10.0.0.0/16`).
-   - **Region**: Select **Another region** $\rightarrow$ **`ap-south-1`** (Mumbai).
-   - **VPC ID (Accepter)**: Paste the VPC ID of `fanvault-db-vpc` (copy this from your Mumbai VPC console).
-   - Click **Create peering connection**.
-2. **Accept the Peering Connection (in Mumbai)**:
-   - *Switch your console region to **`ap-south-1` (Mumbai)**.*
-   - Go to **Peering connections** $\rightarrow$ Select the pending request `fanvault-db-peering`.
-   - Click **Actions** $\rightarrow$ **Accept request** $\rightarrow$ Confirm.
-3. **Configure Peering DNS Resolution**:
-   - *With the peering connection selected in Mumbai*: Click **Actions** $\rightarrow$ **Edit DNS settings** $\rightarrow$ Check ✅ **DNS resolution from requester VPC** $\rightarrow$ **Save**.
-   - *Switch to **`us-east-1` (N. Virginia)**:* Go to **Peering connections** $\rightarrow$ Select `fanvault-db-peering` $\rightarrow$ **Actions** $\rightarrow$ **Edit DNS settings** $\rightarrow$ Check ✅ **DNS resolution from accepter VPC** $\rightarrow$ **Save**.
-4. **Update Route Tables with Peering Paths**:
-   - **In N. Virginia (`us-east-1`)**:
-     * VPC Console $\rightarrow$ **Route Tables** $\rightarrow$ Select `fanvault-rt-private`.
-     * Click **Routes** $\rightarrow$ **Edit routes** $\rightarrow$ **Add route**: Destination `10.1.0.0/16` $\rightarrow$ Target: **Peering Connection** $\rightarrow$ Select `fanvault-db-peering`. Save.
-   - **In Mumbai (`ap-south-1`)**:
-     * VPC Console $\rightarrow$ **Route Tables** $\rightarrow$ Select `fanvault-db-rt`.
-     * Click **Routes** $\rightarrow$ **Edit routes** $\rightarrow$ **Add route**: Destination `10.0.0.0/16` $\rightarrow$ Target: **Peering Connection** $\rightarrow$ Select `fanvault-db-peering`. Save.
+**Orders**
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/orders` | Bearer | Place order — calculates subtotal + 18% GST + ₹99 shipping (free above ₹1999) |
+| `GET` | `/api/orders/my` | Bearer | Paginated list of own orders |
+| `GET` | `/api/orders/:id` | Bearer | Order detail |
+| `POST` | `/api/orders/:id/cancel` | Bearer | Cancel own pending order |
+| `GET` | `/api/orders` | Admin | All orders (admin) |
+| `PATCH` | `/api/orders/:id/status` | Admin | Update order status |
+
+**Admin**
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/admin/audit-logs` | Admin | Query audit log entries |
+| `GET` | `/api/admin/inventory` | Admin | Full inventory view |
+| `PATCH` | `/api/admin/inventory/:productId` | Admin | Update product stock |
+| `GET` | `/api/admin/metadata/:metaType` | Admin | List categories or franchises |
+| `POST` | `/api/admin/metadata/:metaType` | Admin | Create/update category or franchise |
+| `DELETE` | `/api/admin/metadata/:metaType/:metaId` | Admin | Deactivate category or franchise |
+
+#### Environment Variables
+
+| Variable | Required | Secret | Default | Description |
+|---|---|---|---|---|
+| `PORT` | Yes | No | `3002` | Express listening port |
+| `NODE_ENV` | Yes | No | — | `production` / `development` |
+| `AWS_REGION` | Yes | No | `us-east-1` | Region for all AWS SDK clients |
+| `DYNAMODB_TABLE_PRODUCTS` | Yes | No | `fanvault-products` | Products table |
+| `DYNAMODB_TABLE_ORDERS` | Yes | No | `fanvault-orders` | Orders table |
+| `DYNAMODB_TABLE_AUDIT_LOGS` | No | No | `fanvault-audit-logs` | Audit log table |
+| `DYNAMODB_TABLE_METADATA` | No | No | `fanvault-metadata` | Categories/franchises table |
+| `JWT_SECRET` | Yes | **Yes** | — | Verify access tokens (must match Identity Service) |
+| `SSM_S3_BUCKET_PATH` | No | No | `/fanvault/s3/bucket` | SSM path to product images bucket name |
+| `SSM_S3_REGION_PATH` | No | No | `/fanvault/s3/region` | SSM path to bucket region |
+| `SSM_CLOUDFRONT_URL_PATH` | No | No | `/fanvault/s3/cloudfront_url` | SSM path to CloudFront domain for image URLs |
+| `EVENTBRIDGE_BUS_NAME` | No | No | `fanvault-event-bus` | EventBridge custom bus name |
+| `CORS_ORIGIN` | Yes | No | — | Allowed client origin |
+| `USE_SECRETS_MANAGER` | No | No | `false` | Fetch JWT secret from Secrets Manager |
+| `SECRET_ID` | No | No | `production/fanvault-auth` | Secrets Manager secret ID |
 
 ---
 
-### STEP 4: Configure Security Groups
-1. **In `us-east-1` (N. Virginia)**:
-   Go to **EC2 Console** $\rightarrow$ **Security Groups** $\rightarrow$ **Create security group**:
-   - **`fanvault-alb-sg`**: Inbound allows HTTP (80) and HTTPS (443) from `0.0.0.0/0`.
-   - **`fanvault-frontend-sg`**: Inbound allows HTTP (80) from Source: Custom $\rightarrow$ Select `fanvault-alb-sg`.
-   - **`fanvault-backend-sg`**: Inbound allows Custom TCP (3001) and Custom TCP (3002) from Source: Custom $\rightarrow$ Select `fanvault-alb-sg`.
-   - **`fanvault-bastion-sg`**: Inbound allows SSH (22) from Source: **My IP** (auto-fills your current IP).
-   
-   *Update private instance SSH rules*:
-   - Edit inbound rules for `fanvault-frontend-sg` $\rightarrow$ Add: SSH (22) from `fanvault-bastion-sg`.
-   - Edit inbound rules for `fanvault-backend-sg` $\rightarrow$ Add: SSH (22) from `fanvault-bastion-sg`.
-2. **In `ap-south-1` (Mumbai)**:
-   Go to **EC2 Console** $\rightarrow$ **Security Groups** $\rightarrow$ **Create security group**:
-   - **`fanvault-db-sg`**:
-     * Inbound Rule 1: Custom TCP (27017) from Source: `10.0.0.0/16` (Allows primary VPC apps).
-     * Inbound Rule 2: SSH (22) from Source: `10.0.0.0/16` (Allows administration via N. Virginia Bastion).
+### Frontend (`fanvault-frontend`)
 
----
+**Build tool:** Vite 6 | **Framework:** React 18 | **Runtime:** Nginx (static file server)
 
-### STEP 5: Deploy MongoDB (Mumbai)
-*Make sure you are in the **`ap-south-1` (Mumbai)** region.*
+The SPA communicates with the backend exclusively via relative API paths (`/api/*`). Nginx proxies these paths to the Identity and Commerce services running on `127.0.0.1`. No backend URLs appear in the frontend bundle.
 
-1. **Launch the MongoDB EC2**:
-   - Go to **EC2 Console** $\rightarrow$ **Launch instance**.
-   - Name: `fanvault-mongodb` | AMI: **Ubuntu Server 22.04 LTS** | Instance Type: `t3.medium`.
-   - Key pair: Create and download `fanvault-db-key.pem`.
-   - **Network settings $\rightarrow$ Edit**:
-     * VPC: `fanvault-db-vpc`
-     * Subnet: `fanvault-db-private-1a`
-     * Auto-assign public IP: **Disable**
-     * Security Group: `fanvault-db-sg`
-   - Storage: `50 GiB` / gp3. Launch instance.
-   - Note the **Private IP address** from the console (e.g., `10.1.31.100`).
+**Code splitting** (Vite `manualChunks`):
+- `vendor` — React, React DOM, React Router
+- `utils` — Axios
 
----
+#### Pages & Routes
 
-### STEP 6: Route53 Private DNS Setup
-*Switch your console region back to **`us-east-1` (N. Virginia)**.*
-
-1. **Create Private Hosted Zone**:
-   - Go to **Route 53** $\rightarrow$ **Hosted zones** $\rightarrow$ **Create hosted zone**.
-   - Domain name: `fanvault.internal` | Type: **Private hosted zone**.
-   - Region: `us-east-1` | VPC ID: Select `fanvault-vpc`. Click **Create**.
-2. **Map the Database DNS Record**:
-   - Inside `fanvault.internal` PHZ $\rightarrow$ Click **Create record**.
-   - Record name: `db` | Type: **A** | Value: Enter the MongoDB EC2 Private IP (e.g. `10.1.31.100`).
-   - TTL: `60`. Click **Create records**.
-3. **Associate the Private Hosted Zone with the Mumbai VPC**:
-   *AWS Console does not allow cross-region Hosted Zone associations. Run this command from your local terminal with configured AWS CLI credentials:*
-   ```bash
-   aws route53 associate-vpc-with-hosted-zone \
-     --hosted-zone-id YOUR_ZONE_ID_HERE \
-     --vpc VPCRegion=ap-south-1,VPCId=YOUR_MUMBAI_VPC_ID_HERE
-   ```
-
----
-
-## 4. Application Server Deployment Walkthrough
-
-Deploy the backend services and seed your data.
-
-### STEP 1: Launch Application Instances (N. Virginia)
-*Make sure you are in **`us-east-1`**.*
-
-Launch three separate EC2 instances in your private subnets to serve as your **Golden Instances** (which we will configure and bake into AMIs later):
-1. **`fanvault-identity-svc`** (Golden instance for Auth ASG):
-   - Subnet: `fanvault-backend-1a` | Public IP: **Disable** | Security Group: `fanvault-backend-sg` | Type: `t3.small`
-2. **`fanvault-commerce-svc`** (Golden instance for Commerce ASG):
-   - Subnet: `fanvault-backend-1a` | Public IP: **Disable** | Security Group: `fanvault-backend-sg` | Type: `t3.small`
-3. **`fanvault-frontend-svc`** (Golden instance for Nginx ASG):
-   - Subnet: `fanvault-frontend-1a` | Public IP: **Disable** | Security Group: `fanvault-frontend-sg` | Type: `t3.small`
-4. **`fanvault-bastion`** (Jump host in public subnet):
-   - Subnet: `fanvault-public-1a` | Public IP: **Enable** | Security Group: `fanvault-bastion-sg` | Type: `t3.micro`
-
----
-
-### STEP 2: Configure SSH Agent Forwarding
-To connect securely to your private instances without exposing your private `.pem` key files on the public bastion host:
-
-1. **On your local machine**:
-   ```bash
-   # Add your key to SSH agent
-   ssh-add -K fanvault-key.pem
-   
-   # Jump into public Bastion host forwarding keys
-   ssh -A ubuntu@YOUR_BASTION_PUBLIC_IP
-   ```
-2. **From the Bastion shell**, connect directly to the private nodes:
-   ```bash
-   ssh ubuntu@YOUR_IDENTITY_PRIVATE_IP
-   ssh ubuntu@YOUR_COMMERCE_PRIVATE_IP
-   ssh ubuntu@YOUR_FRONTEND_PRIVATE_IP
-   ```
-
----
-
-### STEP 3: MongoDB Native Setup (ap-south-1 Mumbai)
-Connect to the MongoDB private node by jumping from your N. Virginia Bastion:
-```bash
-# From Bastion, connect to Mumbai DB Private IP
-ssh ubuntu@10.1.31.100
-```
-
-1. **Install MongoDB 7.0**:
-   ```bash
-   curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | \
-     gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
-   
-   echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] \
-     https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | \
-     sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
-   
-   sudo apt-get update && sudo apt-get install -y mongodb-org
-   ```
-2. **Enable Inbound Network Access & Security**:
-   ```bash
-   sudo nano /etc/mongod.conf
-   ```
-   Modify these sections:
-   ```yaml
-   net:
-     port: 27017
-     bindIp: 0.0.0.0       # Allow connections from peered VPC
-   
-   security:
-     authorization: enabled # Enable RBAC authentication
-   ```
-   Save and restart:
-   ```bash
-   sudo systemctl enable mongod && sudo systemctl restart mongod
-   ```
-3. **Configure Database Users**:
-   ```bash
-   mongosh
-   ```
-   ```javascript
-   use admin
-   db.createUser({
-     user: "dbadmin",
-     pwd: "StrongAdminPassword123",
-     roles: [ { role: "userAdminAnyDatabase", db: "admin" }, "readWriteAnyDatabase" ]
-   })
-   
-   use fanvault_db
-   db.createUser({
-     user: "dbuser",
-     pwd: "AppSecurePassword2026",
-     roles: [ { role: "readWrite", db: "fanvault_db" } ]
-   })
-   exit
-   ```
-
----
-
-### STEP 4: Deploy Identity & Commerce Services (us-east-1)
-
-Run this sequence on **both** the `fanvault-identity-svc` and `fanvault-commerce-svc` private EC2 instances:
-
-1. **Install Node.js 18 & PM2/Systemd environment**:
-   ```bash
-   curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-   sudo apt-get install -y nodejs
-   sudo useradd --system --no-create-home --shell /usr/sbin/nologin fanvault
-   ```
-2. **Deploy Application Files**:
-   *From your local machine, transfer directories to the private target nodes using SCP through the Bastion proxy:*
-   ```bash
-   scp -o "ProxyJump ubuntu@YOUR_BASTION_PUBLIC_IP" -r ./fanvault-user-auth-service ubuntu@YOUR_IDENTITY_PRIVATE_IP:/home/ubuntu/
-   ```
-3. **Configure the Environment variables (`.env`)**:
-   Create `/var/www/fanvault-user-auth-service/.env` on the instance:
-   ```bash
-   PORT=3001
-   NODE_ENV=production
-   # Resolves cross-region via Route53 private DNS
-   MONGO_URI=mongodb://dbuser:AppSecurePassword2026@db.fanvault.internal:27017/fanvault_db?authSource=fanvault_db
-   JWT_SECRET=supersecretjwtsigningkeyhere123!
-   CORS_ORIGIN=http://YOUR_ALB_DNS_NAME
-   ```
-   *(Ensure the Commerce service `.env` uses `PORT=3002`, the same `MONGO_URI`, and the exact same `JWT_SECRET` for stateless token verification).*
-4. **Install Dependencies & Start systemd daemon**:
-   ```bash
-   cd /var/www/fanvault-user-auth-service
-   sudo npm install --omit=dev
-   sudo chown -R fanvault:fanvault /var/www/fanvault-user-auth-service
-   
-   # Copy systemd service file
-   sudo cp /home/ubuntu/fanvault-user-auth-service/deploy/fanvault-auth.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable fanvault-auth
-   sudo systemctl start fanvault-auth
-   ```
-
----
-
-### STEP 5: Run Database Seeder
-Upload the seed script from your local machine to the private Identity instance:
-```bash
-scp -o "ProxyJump ubuntu@YOUR_BASTION_PUBLIC_IP" ./shared-resources/database/seed-data.js ubuntu@YOUR_IDENTITY_PRIVATE_IP:/home/ubuntu/
-```
-SSH into the Identity instance and execute:
-```bash
-cd /home/ubuntu
-npm install mongoose bcryptjs dotenv
-MONGO_URI="mongodb://dbuser:AppSecurePassword2026@db.fanvault.internal:27017/fanvault_db?authSource=fanvault_db" node seed-data.js
-```
-
----
-
-### STEP 6: Deploy Frontend (us-east-1)
-1. **Compile React static assets locally**:
-   ```bash
-   cd fanvault-frontend
-   npm install && npm run build # Outputs compiled assets to dist/
-   ```
-2. **Upload assets to the Frontend EC2 instance**:
-   ```bash
-   scp -o "ProxyJump ubuntu@YOUR_BASTION_PUBLIC_IP" -r ./dist ubuntu@YOUR_FRONTEND_PRIVATE_IP:/home/ubuntu/
-   ```
-3. **Install and configure Nginx on the Frontend node**:
-   ```bash
-   sudo apt-get update && sudo apt-get install -y nginx
-   sudo mkdir -p /var/www/fanvault-frontend
-   sudo rsync -av /home/ubuntu/dist/ /var/www/fanvault-frontend/dist/
-   ```
-   Configure Nginx server block (`/etc/nginx/sites-available/default`):
-   ```nginx
-   server {
-       listen 80;
-       server_name _;
-       root /var/www/fanvault-frontend/dist;
-       index index.html;
-
-       location / {
-           try_files $uri $uri/ /index.html;
-       }
-   }
-   ```
-   Verify configurations and restart Nginx:
-   ```bash
-   sudo nginx -t && sudo systemctl enable nginx && sudo systemctl restart nginx
-   ```
-
----
-
-## 5. Load Balancing & Auto Scaling Setup
-
-Now we will scale our single-instance deployment into a high-availability, auto-scaling multi-AZ structure.
-
-### STEP 1: Bake Golden AMIs
-On the AWS EC2 Console, stop your validated golden instances (`fanvault-identity-svc`, `fanvault-commerce-svc`, `fanvault-frontend-svc`). 
-- Right-click each instance $\rightarrow$ **Image and templates** $\rightarrow$ **Create image**.
-- Tags: `fanvault-identity-ami-v2`, `fanvault-commerce-ami-v2`, `fanvault-frontend-ami-v2`.
-
----
-
-### STEP 2: Create Target Groups
-Create three target groups in **`us-east-1`** under **EC2 Console** $\rightarrow$ **Target groups**:
-1. **`fanvault-frontend-tg`**: Protocol: `HTTP` | Port: `80` | VPC: `fanvault-vpc` | Health Check Path: `/index.html`.
-2. **`fanvault-identity-tg`**: Protocol: `HTTP` | Port: `3001` | VPC: `fanvault-vpc` | Health Check Path: `/health`.
-3. **`fanvault-commerce-tg`**: Protocol: `HTTP` | Port: `3002` | VPC: `fanvault-vpc` | Health Check Path: `/health`.
-
----
-
-### STEP 3: Setup the Application Load Balancer
-1. Go to **Load Balancers** $\rightarrow$ **Create Load Balancer** $\rightarrow$ **Application Load Balancer**.
-2. Name: `fanvault-alb` | Scheme: Internet-facing | Address: IPv4 | VPC: `fanvault-vpc`.
-3. **Mappings**: Select both Availability Zones `us-east-1a` and `us-east-1b`, linking them to the **Public Subnets** (`fanvault-public-1a` and `fanvault-public-1b`).
-4. Select Security Group: `fanvault-alb-sg`.
-5. **Listeners & Routing**:
-   - Listener 1: HTTPS (Port 443) $\rightarrow$ Default Action: Forward to `fanvault-frontend-tg` $\rightarrow$ Select ACM wild-card certificate.
-   - Listener 2: HTTP (Port 80) $\rightarrow$ Default Action: **Redirect to HTTPS** (301 Permanent Redirect).
-6. **Configure HTTPS Listener Rules (evaluated top-to-bottom)**:
-   - **Rule 1 (P10)**: Path is `/api/auth/*` $\rightarrow$ Forward to `fanvault-identity-tg`.
-   - **Rule 2 (P20)**: Path is `/api/users/*` $\rightarrow$ Forward to `fanvault-identity-tg`.
-   - **Rule 3 (P30)**: Path is `/api/products/*` $\rightarrow$ Forward to `fanvault-commerce-tg`.
-   - **Rule 4 (P40)**: Path is `/api/orders/*` $\rightarrow$ Forward to `fanvault-commerce-tg`.
-   - **Rule 5 (P99, Default)**: Path is `/*` $\rightarrow$ Forward to `fanvault-frontend-tg`.
-
----
-
-### STEP 4: Deploy Auto Scaling Groups (ASG)
-For each service (Frontend, Identity, Commerce), create a **Launch Template** and an **Auto Scaling Group**:
-
-1. **Create Launch Templates**:
-   - Source AMI: Use your corresponding baked AMI (e.g. `fanvault-identity-ami-v2`).
-   - Instance Type: `t3.small` | Key Pair: `fanvault-key` | Security Group: corresponding SG (e.g., `fanvault-backend-sg`).
-2. **Create Auto Scaling Groups**:
-   - Link the corresponding Launch Template.
-   - **Network Mappings**: VPC: `fanvault-vpc` | Subnets: Private subnets `1a` and `1b` (e.g. `fanvault-backend-1a` and `fanvault-backend-1b` for backend ASGs).
-   - **Load Balancing**: Integrate with existing load balancer $\rightarrow$ Select target group (e.g. `fanvault-identity-tg`).
-   - **Group size**: Desired Capacity: `2` | Minimum Capacity: `2` | Maximum Capacity: `4`.
-   - **Scaling Policies**: Select **Target Tracking** $\rightarrow$ Metric type: Average CPU utilization $\rightarrow$ Target value: `70` | Cooldown: `300 seconds`.
-
----
-
-## 6. S3 & Lambda Host-Based Routing Integration
-
-Demonstrate secure serverless hosting using host-based ALB routing:
-
-1. **Deploy S3 Private Bucket**:
-   - Go to **S3 Console** $\rightarrow$ **Create bucket**. Name: `fanvault-architecture-bucket` (block all public access).
-   - Upload your static architecture page `architecture.html` or diagram image `architecture.png`.
-2. **Create IAM Role for Lambda**:
-   - Go to **IAM Console** $\rightarrow$ **Roles** $\rightarrow$ **Create role** $\rightarrow$ Select **Lambda** service.
-   - Attach policy: **`AmazonS3ReadOnlyAccess`** $\rightarrow$ Name: `fanvault-lambda-s3-role`.
-3. **Provision the Lambda Function**:
-   - Go to **Lambda Console** $\rightarrow$ **Create function**.
-   - Name: `arch-page-lambda` | Runtime: Node.js 20.x | Role: `fanvault-lambda-s3-role`.
-   - Paste the handler code (returns S3 content dynamically, with base64 conversion for binary assets):
-     ```javascript
-     const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
-     const s3 = new S3Client({});
-
-     exports.handler = async (event) => {
-         try {
-             const command = new GetObjectCommand({
-                 Bucket: "fanvault-architecture-bucket",
-                 Key: "architecture.png" // or architecture.html
-             });
-             const response = await s3.send(command);
-             const body = await response.Body.transformToByteArray();
-             const base64String = Buffer.from(body).toString("base64");
-
-             return {
-                 statusCode: 200,
-                 statusDescription: "200 OK",
-                 isBase64Encoded: true,
-                 headers: {
-                     "Content-Type": "image/png",
-                     "Cache-Control": "public, max-age=86400"
-                 },
-                 body: base64String
-             };
-         } catch (err) {
-             return {
-                 statusCode: 500,
-                 headers: { "Content-Type": "text/plain" },
-                 body: "Internal Server Error: " + err.message
-             };
-         }
-     };
-     ```
-   - Click **Deploy**.
-4. **Connect Lambda to the ALB**:
-   - Go to **Target Groups** $\rightarrow$ **Create target group**. Target type: **Lambda function** | Name: `fanvault-lambda-tg`. Register `arch-page-lambda`.
-   - Go to **Load Balancer (`fanvault-alb`)** $\rightarrow$ HTTPS Listener Rules $\rightarrow$ **Add rule (Priority 5)**:
-     * Condition: **Host Header** is `arch.fanvault.com`
-     * Action: Forward to `fanvault-lambda-tg`.
-
----
-
-## 7. Verification and Troubleshooting
-
-### End-to-End Verification Checklists
-
-#### 1. Confirm Cross-Region Port Connectivity (Mumbai $\leftrightarrow$ N. Virginia)
-SSH into any backend instance in N. Virginia (`us-east-1`) and verify:
-```bash
-# 1. Verify Private Route53 resolves to Mumbai Private IP
-nslookup db.fanvault.internal
-# Expected output: Address: 10.1.31.100
-
-# 2. Test TCP transit over the Peering link
-nc -zv db.fanvault.internal 27017
-# Expected output: Connection to db.fanvault.internal port 27017 [tcp/*] succeeded!
-```
-
-#### 2. Confirm App Health Checks & DB Access
-```bash
-# Health check endpoints should return DB connected status
-curl http://localhost:3001/health
-# Expected: {"status":"ok","db":"connected"}
-
-curl http://localhost:3002/health
-# Expected: {"status":"ok","db":"connected"}
-```
-
-### Common Issues & Resolving Patches
-
-| Sympton / Error | Cause | Quick Fix |
+| Route | Component | Access |
 |---|---|---|
-| MongoDB connection times out | Missing peering connection routes | Ensure N. Virginia private route tables have `10.1.0.0/16` pointing to `pcx`, and Mumbai route tables have `10.0.0.0/16` pointing to `pcx`. |
-| `mongosh` connection rejected | IP Bindings incorrect in config | Edit `/etc/mongod.conf` in Mumbai, set `bindIp: 0.0.0.0`, and restart service. |
-| Authentication fails on connection | Missing authSource in connection URI | Ensure Node.js connection URI explicitly includes `?authSource=fanvault_db` parameter. |
-| Lambda images render as broken text | missing base64 settings | Ensure the Lambda ALB integration response has `isBase64Encoded: true` and the binary buffer is parsed as base64. |
+| `/` | `HomePage` | Public |
+| `/login` | `LoginPage` | Guest only (redirects to `/` if logged in) |
+| `/register` | `RegisterPage` | Guest only |
+| `/products` | `ProductsPage` | Public |
+| `/products/:productId` | `ProductDetailPage` | Public |
+| `/cart` | `CartPage` | Public (local cart state) |
+| `/checkout` | `CheckoutPage` | Protected |
+| `/orders` | `OrdersPage` | Protected |
+| `/orders/:id` | `OrderDetailPage` | Protected |
+| `/profile` | `ProfilePage` | Protected |
+| `/admin` | `AdminDashboard` | Admin role |
+| `/admin/products` | `AdminProducts` | Admin role |
+| `/admin/products/new` | `AdminProductForm` | Admin role |
+| `/admin/products/:id/edit` | `AdminProductForm` | Admin role |
+| `/admin/inventory` | `AdminInventory` | Admin role |
+| `/admin/categories` | `AdminCategories` | Admin role |
+| `/admin/orders` | `AdminOrders` | Admin role |
+| `/admin/audit` | `AdminAudit` | Admin role |
+
+**Route protection:**
+- `ProtectedRoute` — redirects to `/login` if no authenticated user
+- `AdminRoute` — additionally checks `user.role === 'admin'`
+- `GuestRoute` — redirects to `/` if already authenticated
+
+#### Build & Nginx
+
+```bash
+cd fanvault-frontend
+npm install
+npm run build          # outputs to dist/
+```
+
+Nginx serves `dist/` as the web root. The catch-all `try_files $uri $uri/ /index.html` enables client-side React Router navigation. API paths proxy to localhost backend services.
+
+#### Environment Variables (build-time only)
+
+| Variable | Required | Description |
+|---|---|---|
+| `VITE_APP_NAME` | No | App display name in browser tab (default: `FanVault`) |
+
+---
+
+## Event-Driven Pipeline
+
+The Commerce Service publishes domain events to EventBridge after state changes. Events are fire-and-forget — publication failures are logged but never block the HTTP response.
+
+| Event (DetailType) | Trigger | Consumers |
+|---|---|---|
+| `ProductCreated` | Admin creates a product | Audit logging Lambda, Thumbnail generator Lambda |
+| `ProductUpdated` | Admin updates a product | Audit logging Lambda, Thumbnail generator Lambda |
+| `InventoryLow` | Stock ≤ 5 on create or update | Audit logging Lambda, Inventory monitor Lambda → SNS low-inventory topic |
+| `OrderPlaced` | Customer places an order | Audit logging Lambda |
+
+All EventBridge rules: retry up to 3 attempts over 1 hour; undeliverable events land in the SQS DLQ (`fanvault-event-dlq`, 14-day retention).
+
+---
+
+## Data Model
+
+All tables use **PAY_PER_REQUEST** billing, KMS encryption, and PITR.
+
+| Table | PK | SK | Key GSIs | Service |
+|---|---|---|---|---|
+| `fanvault-users` | `userId` | — | `email-index` | Identity |
+| `fanvault-profiles` | `userId` | — | — | Identity |
+| `fanvault-products` | `productId` | — | `sku-index`, `category-franchise-index` | Commerce |
+| `fanvault-orders` | `orderId` | — | `userId-createdAt-index`, `orderNumber-index`, `status-createdAt-index` | Commerce |
+| `fanvault-audit-logs` | `logId` | — | `entityType-timestamp-index`, `adminId-timestamp-index` | Commerce (1-day TTL) |
+| `fanvault-metadata` | `metaType` | `metaId` | — | Commerce (categories/franchises) |
+
+---
+
+## Local Development
+
+### Prerequisites
+- Node.js ≥ 18
+- AWS credentials configured (for DynamoDB, SSM, EventBridge, S3, SNS)
+- DynamoDB tables already provisioned (via the Terraform repo)
+
+### Running the Backend Services
+
+```bash
+# Identity Service
+cd fanvault-user-auth-service
+cp .env.example .env          # fill in table names and JWT secrets
+npm install
+npm run dev                   # nodemon on :3001
+
+# Commerce Service (new terminal)
+cd fanvault-commerce-service
+cp .env.example .env          # fill in table names, JWT secret, SSM paths
+npm install
+npm run dev                   # nodemon on :3002
+```
+
+### Running the Frontend
+
+```bash
+cd fanvault-frontend
+npm install
+npm run dev                   # Vite dev server on :5173
+```
+
+> **Note:** In dev mode Vite does not go through Nginx, so configure a Vite proxy in `vite.config.js` or set the API base URL to point directly at the backend ports if needed.
+
+---
+
+## Production Deployment (EC2 / Terraform-managed ASGs)
+
+The Terraform repo ([Terraform-Fanvault-Infra](../Terraform-Fanvault-Infra/)) provisions all AWS infrastructure. EC2 instances are bootstrapped via user data scripts.
+
+### Backend + Frontend (Monolithic App Node)
+
+Both Node.js services and Nginx run on the same EC2 instance (managed by the backend ASG). The instance pulls code from GitHub at boot, installs dependencies, builds the frontend, and starts systemd services.
+
+```bash
+# Managed automatically by EC2 user data (deploy/aws-userdata-app.sh)
+# Manually replicate on a golden instance:
+
+# 1. Install Node.js 18
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt-get install -y nodejs nginx
+
+# 2. Clone and deploy Identity Service
+sudo mkdir -p /var/www/fanvault-user-auth-service
+sudo rsync -av ./fanvault-user-auth-service/ /var/www/fanvault-user-auth-service/
+cd /var/www/fanvault-user-auth-service && sudo npm install --omit=dev
+sudo cp deploy/fanvault-auth.service /etc/systemd/system/
+sudo systemctl enable --now fanvault-auth
+
+# 3. Clone and deploy Commerce Service
+sudo mkdir -p /var/www/fanvault-commerce-service
+sudo rsync -av ./fanvault-commerce-service/ /var/www/fanvault-commerce-service/
+cd /var/www/fanvault-commerce-service && sudo npm install --omit=dev
+sudo cp deploy/fanvault-commerce.service /etc/systemd/system/
+sudo systemctl enable --now fanvault-commerce
+
+# 4. Build and deploy Frontend
+cd fanvault-frontend && npm install && npm run build
+sudo rsync -av dist/ /var/www/fanvault-frontend/dist/
+sudo cp nginx.conf /etc/nginx/sites-available/fanvault
+sudo ln -sf /etc/nginx/sites-available/fanvault /etc/nginx/sites-enabled/fanvault
+sudo systemctl enable --now nginx
+```
+
+### Service Management
+
+```bash
+# Check service status
+sudo systemctl status fanvault-auth
+sudo systemctl status fanvault-commerce
+
+# Restart a service
+sudo systemctl restart fanvault-auth
+
+# View logs (last 100 lines)
+sudo journalctl -u fanvault-auth -n 100
+sudo journalctl -u fanvault-commerce -n 100
+```
+
+### SSH Access (via Bastion)
+
+```bash
+# Add key to agent (required for agent forwarding)
+ssh-add fanvault-key.pem
+
+# Jump to a private backend instance
+ssh -A -J ubuntu@<BASTION_PUBLIC_IP> ubuntu@<BACKEND_PRIVATE_IP>
+```
+
+---
+
+## Health Checks
+
+| Endpoint | Port | Expected Response |
+|---|---|---|
+| `GET /health` | `3001` | `{"status":"ok","service":"fanvault-user-auth-service","database":"dynamodb"}` |
+| `GET /health` | `3002` | `{"status":"ok","service":"fanvault-commerce-service","database":"dynamodb"}` |
+| `GET /health` | `80` (Nginx) | `{"status":"ok","service":"fanvault-frontend"}` |
+
+```bash
+# From inside a backend EC2 instance:
+curl http://localhost:3001/health
+curl http://localhost:3002/health
+
+# Via ALB (from anywhere with HTTPS access):
+curl https://<ALB_DNS_NAME>/api/auth/verify
+curl https://<ALB_DNS_NAME>/api/products
+```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, Vite 6, React Router v6, Axios, react-hot-toast, lucide-react |
+| Backend | Node.js ≥ 18, Express 4, Helmet, Morgan, express-rate-limit, express-validator |
+| Auth | JWT (jsonwebtoken), bcryptjs |
+| Database | AWS DynamoDB (`@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb`) |
+| Object Storage | AWS S3 + S3 Request Presigner |
+| CDN | AWS CloudFront (OAC for S3, custom header for ALB) |
+| Events | AWS EventBridge (custom bus) |
+| Alerts | AWS SNS (KMS-encrypted) + SQS fan-out |
+| Config | AWS SSM Parameter Store |
+| Secrets | AWS Secrets Manager (optional, production) |
+| Web Server | Nginx (static files + local API proxy) |
+| Process Manager | systemd |
+| Infrastructure | Terraform ≥ 1.5, AWS provider ~5.0 |
+| CI/CD | GitHub Actions + OIDC (no long-lived keys) |
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---|---|---|
+| `DynamoDB health-check failed` at startup | Missing table or wrong region | Verify `DYNAMODB_TABLE_USERS` name and `AWS_REGION` match provisioned tables |
+| `401 Unauthorized` on all API calls | JWT secret mismatch between services | Ensure `JWT_SECRET` is identical in both `.env` files |
+| Images returning 403 | CloudFront OAC not set up, or S3 bucket policy missing | Check CloudFront distribution OAC config and S3 bucket policy in Terraform |
+| Presigned URL PUT fails (403) | S3 CORS policy | Verify `allowed_origins` in the `aws_s3_bucket_cors_configuration` resource |
+| EventBridge events not delivered | `EVENTBRIDGE_BUS_NAME` mismatch | Confirm the bus name matches the Terraform output `event_bus_name` |
+| Nginx `502 Bad Gateway` on `/api/*` | Backend service not running | `systemctl status fanvault-auth` / `fanvault-commerce`; check `journalctl` |
+| `403 Forbidden` on ALB direct access | Correct — ALB blocks requests without `X-Custom-Header` | Route traffic through CloudFront |
